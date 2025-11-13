@@ -1,0 +1,2230 @@
+# NOTIFICATIONS API - COMPLETE SPECIFICATION
+# Optimized for AI Code Generation - FastAPI + PostgreSQL + Stored Procedures
+
+## OVERVIEW
+
+### Purpose
+The Notifications API manages all platform notifications including activity invites, reminders, community updates, social interactions, and Premium-exclusive features (profile views, favorites).
+
+### Architecture Pattern
+- **Framework**: FastAPI (Python)
+- **Database**: PostgreSQL (activity schema)
+- **Data Access**: 100% Stored Procedures (NO direct queries)
+- **Authentication**: JWT tokens from Auth API
+- **Dependencies**: Auth API (token validation), Email API (notification delivery)
+
+### Core Principles for AI Implementation
+1. Every endpoint maps to exactly ONE stored procedure
+2. All business logic lives in PostgreSQL stored procedures
+3. API layer is pure routing + validation + error handling
+4. No direct SQL queries in Python code
+5. Subscription-level checks in stored procedures (read from users.subscription_level)
+6. Ghost mode checks in stored procedures (read from user_settings.ghost_mode)
+
+---
+
+## DATABASE SCHEMA REFERENCE
+
+### Tables Used by Notifications API
+
+```sql
+-- Main notifications table
+activity.notifications (
+    notification_id UUID PRIMARY KEY,
+    user_id UUID NOT NULL,                    -- Recipient
+    actor_user_id UUID,                       -- Who triggered the notification
+    notification_type activity.notification_type NOT NULL,
+    target_type VARCHAR(50),                  -- 'activity', 'post', 'comment', 'user'
+    target_id UUID,                           -- ID of the target
+    title VARCHAR(255) NOT NULL,
+    message TEXT,
+    status activity.notification_status NOT NULL DEFAULT 'unread',
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    read_at TIMESTAMP WITH TIME ZONE,
+    payload JSONB,
+    hash_value VARCHAR(64)
+)
+
+-- User settings (for notification preferences)
+activity.user_settings (
+    user_id UUID PRIMARY KEY,
+    email_notifications BOOLEAN NOT NULL DEFAULT TRUE,
+    push_notifications BOOLEAN NOT NULL DEFAULT TRUE,
+    activity_reminders BOOLEAN NOT NULL DEFAULT TRUE,
+    community_updates BOOLEAN NOT NULL DEFAULT TRUE,
+    friend_requests BOOLEAN NOT NULL DEFAULT TRUE,
+    marketing_emails BOOLEAN NOT NULL DEFAULT FALSE,
+    ghost_mode BOOLEAN NOT NULL DEFAULT FALSE,
+    language VARCHAR(10) NOT NULL DEFAULT 'en',
+    timezone VARCHAR(50) NOT NULL DEFAULT 'UTC',
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    payload JSONB,
+    hash_value VARCHAR(64)
+)
+
+-- Users table (for subscription checks)
+activity.users (
+    user_id UUID PRIMARY KEY,
+    subscription_level activity.subscription_level NOT NULL DEFAULT 'free',
+    status activity.user_status NOT NULL DEFAULT 'active',
+    ...
+)
+```
+
+### Notification Types (ENUM)
+```sql
+CREATE TYPE activity.notification_type AS ENUM (
+    'activity_invite',        -- Someone invited you to activity
+    'activity_reminder',      -- Activity happening in 24h
+    'activity_update',        -- Activity changed (time/location/cancelled)
+    'community_invite',       -- Invited to join community
+    'new_member',            -- New member joined community
+    'new_post',              -- New post in community you follow
+    'comment',               -- Comment on your post
+    'reaction',              -- Reaction on your post/comment
+    'mention',               -- Someone mentioned you
+    'profile_view',          -- Someone viewed your profile (PREMIUM ONLY)
+    'new_favorite',          -- Someone favorited you (PREMIUM ONLY)
+    'system'                 -- System notifications
+);
+```
+
+### Notification Status (ENUM)
+```sql
+CREATE TYPE activity.notification_status AS ENUM (
+    'unread',
+    'read',
+    'archived'
+);
+```
+
+---
+
+## AUTHENTICATION & AUTHORIZATION
+
+### Token Validation
+Every endpoint requires JWT token in header:
+```
+Authorization: Bearer <access_token>
+```
+
+Token structure (from Auth API):
+```json
+{
+  "sub": "user_id_uuid",
+  "email": "user@example.com",
+  "org_id": "org_id_uuid",
+  "subscription_level": "premium",
+  "exp": 1704067200,
+  "iat": 1704066300,
+  "type": "access"
+}
+```
+
+### Authorization Rules
+1. Users can only access their own notifications
+2. Premium-exclusive notifications (profile_view, new_favorite) only visible to Premium users
+3. Admins can access any notification (for moderation)
+
+---
+
+## STORED PROCEDURES SPECIFICATION
+
+All stored procedures live in `activity` schema.
+
+### SP1: sp_get_user_notifications
+**Purpose**: Retrieve paginated notifications for a user
+
+```sql
+CREATE OR REPLACE FUNCTION activity.sp_get_user_notifications(
+    p_user_id UUID,
+    p_status activity.notification_status DEFAULT NULL,  -- Filter by status
+    p_notification_type activity.notification_type DEFAULT NULL,  -- Filter by type
+    p_limit INT DEFAULT 20,
+    p_offset INT DEFAULT 0,
+    p_include_premium_only BOOLEAN DEFAULT TRUE  -- Set FALSE for free users
+)
+RETURNS TABLE (
+    notification_id UUID,
+    user_id UUID,
+    actor_user_id UUID,
+    actor_username VARCHAR(100),
+    actor_first_name VARCHAR(100),
+    actor_main_photo_url VARCHAR(500),
+    notification_type activity.notification_type,
+    target_type VARCHAR(50),
+    target_id UUID,
+    title VARCHAR(255),
+    message TEXT,
+    status activity.notification_status,
+    created_at TIMESTAMP WITH TIME ZONE,
+    read_at TIMESTAMP WITH TIME ZONE,
+    payload JSONB,
+    total_count BIGINT  -- Total matching notifications (for pagination)
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    WITH filtered_notifications AS (
+        SELECT 
+            n.notification_id,
+            n.user_id,
+            n.actor_user_id,
+            n.notification_type,
+            n.target_type,
+            n.target_id,
+            n.title,
+            n.message,
+            n.status,
+            n.created_at,
+            n.read_at,
+            n.payload,
+            COUNT(*) OVER() AS total_count
+        FROM activity.notifications n
+        WHERE n.user_id = p_user_id
+          AND (p_status IS NULL OR n.status = p_status)
+          AND (p_notification_type IS NULL OR n.notification_type = p_notification_type)
+          -- Filter out premium-only notifications for free users
+          AND (p_include_premium_only = TRUE OR 
+               n.notification_type NOT IN ('profile_view', 'new_favorite'))
+        ORDER BY n.created_at DESC
+        LIMIT p_limit
+        OFFSET p_offset
+    )
+    SELECT 
+        fn.notification_id,
+        fn.user_id,
+        fn.actor_user_id,
+        u.username AS actor_username,
+        u.first_name AS actor_first_name,
+        u.main_photo_url AS actor_main_photo_url,
+        fn.notification_type,
+        fn.target_type,
+        fn.target_id,
+        fn.title,
+        fn.message,
+        fn.status,
+        fn.created_at,
+        fn.read_at,
+        fn.payload,
+        fn.total_count
+    FROM filtered_notifications fn
+    LEFT JOIN activity.users u ON u.user_id = fn.actor_user_id;
+END;
+$$;
+```
+
+**Business Logic**:
+1. Filter notifications by user_id (security)
+2. Optional filters: status, notification_type
+3. Exclude premium-only notifications if p_include_premium_only = FALSE
+4. Join with users table to get actor details
+5. Return total_count for pagination metadata
+
+---
+
+### SP2: sp_get_notification_by_id
+**Purpose**: Retrieve single notification details
+
+```sql
+CREATE OR REPLACE FUNCTION activity.sp_get_notification_by_id(
+    p_user_id UUID,
+    p_notification_id UUID
+)
+RETURNS TABLE (
+    notification_id UUID,
+    user_id UUID,
+    actor_user_id UUID,
+    actor_username VARCHAR(100),
+    actor_first_name VARCHAR(100),
+    actor_last_name VARCHAR(100),
+    actor_main_photo_url VARCHAR(500),
+    notification_type activity.notification_type,
+    target_type VARCHAR(50),
+    target_id UUID,
+    title VARCHAR(255),
+    message TEXT,
+    status activity.notification_status,
+    created_at TIMESTAMP WITH TIME ZONE,
+    read_at TIMESTAMP WITH TIME ZONE,
+    payload JSONB
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        n.notification_id,
+        n.user_id,
+        n.actor_user_id,
+        u.username AS actor_username,
+        u.first_name AS actor_first_name,
+        u.last_name AS actor_last_name,
+        u.main_photo_url AS actor_main_photo_url,
+        n.notification_type,
+        n.target_type,
+        n.target_id,
+        n.title,
+        n.message,
+        n.status,
+        n.created_at,
+        n.read_at,
+        n.payload
+    FROM activity.notifications n
+    LEFT JOIN activity.users u ON u.user_id = n.actor_user_id
+    WHERE n.notification_id = p_notification_id
+      AND n.user_id = p_user_id;  -- Security: only own notifications
+    
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'NOTIFICATION_NOT_FOUND';
+    END IF;
+END;
+$$;
+```
+
+**Business Logic**:
+1. Security check: notification must belong to p_user_id
+2. Join with users for actor details
+3. Raise exception if not found
+
+---
+
+### SP3: sp_mark_notification_as_read
+**Purpose**: Mark single notification as read
+
+```sql
+CREATE OR REPLACE FUNCTION activity.sp_mark_notification_as_read(
+    p_user_id UUID,
+    p_notification_id UUID
+)
+RETURNS TABLE (
+    notification_id UUID,
+    status activity.notification_status,
+    read_at TIMESTAMP WITH TIME ZONE
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_notification_user_id UUID;
+BEGIN
+    -- Security check
+    SELECT n.user_id INTO v_notification_user_id
+    FROM activity.notifications n
+    WHERE n.notification_id = p_notification_id;
+    
+    IF v_notification_user_id IS NULL THEN
+        RAISE EXCEPTION 'NOTIFICATION_NOT_FOUND';
+    END IF;
+    
+    IF v_notification_user_id != p_user_id THEN
+        RAISE EXCEPTION 'UNAUTHORIZED_ACCESS';
+    END IF;
+    
+    -- Update notification
+    UPDATE activity.notifications
+    SET 
+        status = 'read',
+        read_at = NOW(),
+        updated_at = NOW()
+    WHERE notification_id = p_notification_id
+      AND status = 'unread'  -- Only update if currently unread
+    RETURNING 
+        notifications.notification_id,
+        notifications.status,
+        notifications.read_at
+    INTO notification_id, status, read_at;
+    
+    RETURN NEXT;
+END;
+$$;
+```
+
+**Business Logic**:
+1. Security check: notification belongs to user
+2. Only update if status = 'unread' (idempotent)
+3. Set read_at timestamp
+4. Return updated notification
+
+---
+
+### SP4: sp_mark_notifications_as_read_bulk
+**Purpose**: Mark multiple notifications as read (batch operation)
+
+```sql
+CREATE OR REPLACE FUNCTION activity.sp_mark_notifications_as_read_bulk(
+    p_user_id UUID,
+    p_notification_ids UUID[] DEFAULT NULL,  -- NULL = mark ALL unread as read
+    p_notification_type activity.notification_type DEFAULT NULL  -- Optional filter
+)
+RETURNS TABLE (
+    updated_count INT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_updated_count INT;
+BEGIN
+    IF p_notification_ids IS NOT NULL THEN
+        -- Mark specific notifications
+        UPDATE activity.notifications
+        SET 
+            status = 'read',
+            read_at = NOW(),
+            updated_at = NOW()
+        WHERE user_id = p_user_id
+          AND notification_id = ANY(p_notification_ids)
+          AND status = 'unread';
+    ELSE
+        -- Mark all unread (with optional type filter)
+        UPDATE activity.notifications
+        SET 
+            status = 'read',
+            read_at = NOW(),
+            updated_at = NOW()
+        WHERE user_id = p_user_id
+          AND status = 'unread'
+          AND (p_notification_type IS NULL OR notification_type = p_notification_type);
+    END IF;
+    
+    GET DIAGNOSTICS v_updated_count = ROW_COUNT;
+    
+    RETURN QUERY SELECT v_updated_count;
+END;
+$$;
+```
+
+**Business Logic**:
+1. If p_notification_ids provided: mark those specific IDs
+2. If NULL: mark ALL unread notifications
+3. Optional filter by notification_type
+4. Return count of updated rows
+
+---
+
+### SP5: sp_archive_notification
+**Purpose**: Archive single notification
+
+```sql
+CREATE OR REPLACE FUNCTION activity.sp_archive_notification(
+    p_user_id UUID,
+    p_notification_id UUID
+)
+RETURNS TABLE (
+    notification_id UUID,
+    status activity.notification_status
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_notification_user_id UUID;
+BEGIN
+    -- Security check
+    SELECT n.user_id INTO v_notification_user_id
+    FROM activity.notifications n
+    WHERE n.notification_id = p_notification_id;
+    
+    IF v_notification_user_id IS NULL THEN
+        RAISE EXCEPTION 'NOTIFICATION_NOT_FOUND';
+    END IF;
+    
+    IF v_notification_user_id != p_user_id THEN
+        RAISE EXCEPTION 'UNAUTHORIZED_ACCESS';
+    END IF;
+    
+    -- Archive notification
+    UPDATE activity.notifications
+    SET 
+        status = 'archived',
+        updated_at = NOW()
+    WHERE notifications.notification_id = p_notification_id
+    RETURNING 
+        notifications.notification_id,
+        notifications.status
+    INTO notification_id, status;
+    
+    RETURN NEXT;
+END;
+$$;
+```
+
+**Business Logic**:
+1. Security check: notification belongs to user
+2. Set status to 'archived'
+3. Return updated notification
+
+---
+
+### SP6: sp_delete_notification
+**Purpose**: Permanently delete notification (soft delete via status or hard delete)
+
+```sql
+CREATE OR REPLACE FUNCTION activity.sp_delete_notification(
+    p_user_id UUID,
+    p_notification_id UUID,
+    p_hard_delete BOOLEAN DEFAULT FALSE  -- TRUE = permanent delete
+)
+RETURNS TABLE (
+    success BOOLEAN,
+    message TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_notification_user_id UUID;
+BEGIN
+    -- Security check
+    SELECT n.user_id INTO v_notification_user_id
+    FROM activity.notifications n
+    WHERE n.notification_id = p_notification_id;
+    
+    IF v_notification_user_id IS NULL THEN
+        RAISE EXCEPTION 'NOTIFICATION_NOT_FOUND';
+    END IF;
+    
+    IF v_notification_user_id != p_user_id THEN
+        RAISE EXCEPTION 'UNAUTHORIZED_ACCESS';
+    END IF;
+    
+    IF p_hard_delete THEN
+        -- Permanent delete
+        DELETE FROM activity.notifications
+        WHERE notification_id = p_notification_id;
+        
+        RETURN QUERY SELECT TRUE, 'Notification permanently deleted';
+    ELSE
+        -- Soft delete (archive)
+        UPDATE activity.notifications
+        SET 
+            status = 'archived',
+            updated_at = NOW()
+        WHERE notification_id = p_notification_id;
+        
+        RETURN QUERY SELECT TRUE, 'Notification archived';
+    END IF;
+END;
+$$;
+```
+
+**Business Logic**:
+1. Security check: notification belongs to user
+2. If p_hard_delete = TRUE: permanent DELETE
+3. If FALSE: set status = 'archived'
+4. Return success message
+
+---
+
+### SP7: sp_get_unread_count
+**Purpose**: Get count of unread notifications by type
+
+```sql
+CREATE OR REPLACE FUNCTION activity.sp_get_unread_count(
+    p_user_id UUID,
+    p_include_premium_only BOOLEAN DEFAULT TRUE
+)
+RETURNS TABLE (
+    total_unread INT,
+    activity_invite_count INT,
+    activity_reminder_count INT,
+    activity_update_count INT,
+    community_invite_count INT,
+    new_member_count INT,
+    new_post_count INT,
+    comment_count INT,
+    reaction_count INT,
+    mention_count INT,
+    profile_view_count INT,      -- PREMIUM ONLY
+    new_favorite_count INT,      -- PREMIUM ONLY
+    system_count INT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        COUNT(*)::INT AS total_unread,
+        COUNT(*) FILTER (WHERE notification_type = 'activity_invite')::INT AS activity_invite_count,
+        COUNT(*) FILTER (WHERE notification_type = 'activity_reminder')::INT AS activity_reminder_count,
+        COUNT(*) FILTER (WHERE notification_type = 'activity_update')::INT AS activity_update_count,
+        COUNT(*) FILTER (WHERE notification_type = 'community_invite')::INT AS community_invite_count,
+        COUNT(*) FILTER (WHERE notification_type = 'new_member')::INT AS new_member_count,
+        COUNT(*) FILTER (WHERE notification_type = 'new_post')::INT AS new_post_count,
+        COUNT(*) FILTER (WHERE notification_type = 'comment')::INT AS comment_count,
+        COUNT(*) FILTER (WHERE notification_type = 'reaction')::INT AS reaction_count,
+        COUNT(*) FILTER (WHERE notification_type = 'mention')::INT AS mention_count,
+        COUNT(*) FILTER (WHERE notification_type = 'profile_view' AND p_include_premium_only)::INT AS profile_view_count,
+        COUNT(*) FILTER (WHERE notification_type = 'new_favorite' AND p_include_premium_only)::INT AS new_favorite_count,
+        COUNT(*) FILTER (WHERE notification_type = 'system')::INT AS system_count
+    FROM activity.notifications
+    WHERE user_id = p_user_id
+      AND status = 'unread'
+      AND (p_include_premium_only = TRUE OR 
+           notification_type NOT IN ('profile_view', 'new_favorite'));
+END;
+$$;
+```
+
+**Business Logic**:
+1. Count all unread notifications
+2. Break down by notification_type
+3. Exclude premium-only types if p_include_premium_only = FALSE
+4. Return single row with all counts
+
+---
+
+### SP8: sp_create_notification
+**Purpose**: Create new notification (used by other services)
+
+```sql
+CREATE OR REPLACE FUNCTION activity.sp_create_notification(
+    p_user_id UUID,                          -- Recipient
+    p_actor_user_id UUID,                    -- Who triggered it (NULL for system)
+    p_notification_type activity.notification_type,
+    p_target_type VARCHAR(50),               -- 'activity', 'post', 'comment', 'user'
+    p_target_id UUID,
+    p_title VARCHAR(255),
+    p_message TEXT DEFAULT NULL,
+    p_payload JSONB DEFAULT NULL
+)
+RETURNS TABLE (
+    notification_id UUID,
+    created_at TIMESTAMP WITH TIME ZONE
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_notification_id UUID;
+    v_user_settings RECORD;
+    v_should_create BOOLEAN := TRUE;
+BEGIN
+    -- Get user notification settings
+    SELECT * INTO v_user_settings
+    FROM activity.user_settings
+    WHERE user_id = p_user_id;
+    
+    -- Check if user wants this type of notification
+    CASE p_notification_type
+        WHEN 'activity_invite', 'activity_reminder', 'activity_update' THEN
+            IF v_user_settings.activity_reminders = FALSE THEN
+                v_should_create := FALSE;
+            END IF;
+        WHEN 'community_invite', 'new_member', 'new_post' THEN
+            IF v_user_settings.community_updates = FALSE THEN
+                v_should_create := FALSE;
+            END IF;
+        WHEN 'comment', 'reaction', 'mention', 'profile_view', 'new_favorite' THEN
+            IF v_user_settings.push_notifications = FALSE THEN
+                v_should_create := FALSE;
+            END IF;
+        ELSE
+            -- System notifications always created
+            v_should_create := TRUE;
+    END CASE;
+    
+    -- Check if user exists and is active
+    IF NOT EXISTS (
+        SELECT 1 FROM activity.users 
+        WHERE user_id = p_user_id 
+          AND status = 'active'
+    ) THEN
+        RAISE EXCEPTION 'USER_NOT_FOUND_OR_INACTIVE';
+    END IF;
+    
+    -- Create notification if settings allow
+    IF v_should_create THEN
+        INSERT INTO activity.notifications (
+            notification_id,
+            user_id,
+            actor_user_id,
+            notification_type,
+            target_type,
+            target_id,
+            title,
+            message,
+            status,
+            payload,
+            created_at
+        ) VALUES (
+            uuidv7(),
+            p_user_id,
+            p_actor_user_id,
+            p_notification_type,
+            p_target_type,
+            p_target_id,
+            p_title,
+            p_message,
+            'unread',
+            p_payload,
+            NOW()
+        )
+        RETURNING 
+            notifications.notification_id,
+            notifications.created_at
+        INTO v_notification_id, created_at;
+        
+        RETURN QUERY SELECT v_notification_id, created_at;
+    ELSE
+        -- Return NULL if notification was not created
+        RETURN QUERY SELECT NULL::UUID, NULL::TIMESTAMP WITH TIME ZONE;
+    END IF;
+END;
+$$;
+```
+
+**Business Logic**:
+1. Check user notification preferences (user_settings)
+2. Respect user opt-out settings per notification type
+3. Verify user exists and is active
+4. Create notification if allowed
+5. Return notification_id or NULL if not created
+
+---
+
+### SP9: sp_get_notification_settings
+**Purpose**: Get user's notification preferences
+
+```sql
+CREATE OR REPLACE FUNCTION activity.sp_get_notification_settings(
+    p_user_id UUID
+)
+RETURNS TABLE (
+    user_id UUID,
+    email_notifications BOOLEAN,
+    push_notifications BOOLEAN,
+    activity_reminders BOOLEAN,
+    community_updates BOOLEAN,
+    friend_requests BOOLEAN,
+    marketing_emails BOOLEAN,
+    ghost_mode BOOLEAN,
+    language VARCHAR(10),
+    timezone VARCHAR(50)
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        us.user_id,
+        us.email_notifications,
+        us.push_notifications,
+        us.activity_reminders,
+        us.community_updates,
+        us.friend_requests,
+        us.marketing_emails,
+        us.ghost_mode,
+        us.language,
+        us.timezone
+    FROM activity.user_settings us
+    WHERE us.user_id = p_user_id;
+    
+    IF NOT FOUND THEN
+        -- Return default settings if not exists
+        RETURN QUERY
+        SELECT 
+            p_user_id,
+            TRUE,  -- email_notifications
+            TRUE,  -- push_notifications
+            TRUE,  -- activity_reminders
+            TRUE,  -- community_updates
+            TRUE,  -- friend_requests
+            FALSE, -- marketing_emails
+            FALSE, -- ghost_mode
+            'en'::VARCHAR(10),   -- language
+            'UTC'::VARCHAR(50);  -- timezone
+    END IF;
+END;
+$$;
+```
+
+**Business Logic**:
+1. Retrieve user settings
+2. If not found: return sensible defaults
+3. Include ghost_mode (Premium feature indicator)
+
+---
+
+### SP10: sp_update_notification_settings
+**Purpose**: Update user's notification preferences
+
+```sql
+CREATE OR REPLACE FUNCTION activity.sp_update_notification_settings(
+    p_user_id UUID,
+    p_email_notifications BOOLEAN DEFAULT NULL,
+    p_push_notifications BOOLEAN DEFAULT NULL,
+    p_activity_reminders BOOLEAN DEFAULT NULL,
+    p_community_updates BOOLEAN DEFAULT NULL,
+    p_friend_requests BOOLEAN DEFAULT NULL,
+    p_marketing_emails BOOLEAN DEFAULT NULL,
+    p_ghost_mode BOOLEAN DEFAULT NULL,  -- Only allow if Premium
+    p_language VARCHAR(10) DEFAULT NULL,
+    p_timezone VARCHAR(50) DEFAULT NULL
+)
+RETURNS TABLE (
+    user_id UUID,
+    email_notifications BOOLEAN,
+    push_notifications BOOLEAN,
+    activity_reminders BOOLEAN,
+    community_updates BOOLEAN,
+    friend_requests BOOLEAN,
+    marketing_emails BOOLEAN,
+    ghost_mode BOOLEAN,
+    language VARCHAR(10),
+    timezone VARCHAR(50),
+    updated_at TIMESTAMP WITH TIME ZONE
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_subscription_level activity.subscription_level;
+BEGIN
+    -- Check user subscription level for ghost_mode
+    SELECT u.subscription_level INTO v_subscription_level
+    FROM activity.users u
+    WHERE u.user_id = p_user_id;
+    
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'USER_NOT_FOUND';
+    END IF;
+    
+    -- Validate ghost_mode is Premium-only
+    IF p_ghost_mode = TRUE AND v_subscription_level = 'free' THEN
+        RAISE EXCEPTION 'PREMIUM_FEATURE_REQUIRED: Ghost mode requires Premium subscription';
+    END IF;
+    
+    -- Insert or update settings
+    INSERT INTO activity.user_settings (
+        user_id,
+        email_notifications,
+        push_notifications,
+        activity_reminders,
+        community_updates,
+        friend_requests,
+        marketing_emails,
+        ghost_mode,
+        language,
+        timezone,
+        updated_at
+    ) VALUES (
+        p_user_id,
+        COALESCE(p_email_notifications, TRUE),
+        COALESCE(p_push_notifications, TRUE),
+        COALESCE(p_activity_reminders, TRUE),
+        COALESCE(p_community_updates, TRUE),
+        COALESCE(p_friend_requests, TRUE),
+        COALESCE(p_marketing_emails, FALSE),
+        COALESCE(p_ghost_mode, FALSE),
+        COALESCE(p_language, 'en'),
+        COALESCE(p_timezone, 'UTC'),
+        NOW()
+    )
+    ON CONFLICT (user_id) DO UPDATE SET
+        email_notifications = COALESCE(p_email_notifications, user_settings.email_notifications),
+        push_notifications = COALESCE(p_push_notifications, user_settings.push_notifications),
+        activity_reminders = COALESCE(p_activity_reminders, user_settings.activity_reminders),
+        community_updates = COALESCE(p_community_updates, user_settings.community_updates),
+        friend_requests = COALESCE(p_friend_requests, user_settings.friend_requests),
+        marketing_emails = COALESCE(p_marketing_emails, user_settings.marketing_emails),
+        ghost_mode = COALESCE(p_ghost_mode, user_settings.ghost_mode),
+        language = COALESCE(p_language, user_settings.language),
+        timezone = COALESCE(p_timezone, user_settings.timezone),
+        updated_at = NOW()
+    RETURNING 
+        user_settings.user_id,
+        user_settings.email_notifications,
+        user_settings.push_notifications,
+        user_settings.activity_reminders,
+        user_settings.community_updates,
+        user_settings.friend_requests,
+        user_settings.marketing_emails,
+        user_settings.ghost_mode,
+        user_settings.language,
+        user_settings.timezone,
+        user_settings.updated_at
+    INTO 
+        user_id,
+        email_notifications,
+        push_notifications,
+        activity_reminders,
+        community_updates,
+        friend_requests,
+        marketing_emails,
+        ghost_mode,
+        language,
+        timezone,
+        updated_at;
+    
+    RETURN NEXT;
+END;
+$$;
+```
+
+**Business Logic**:
+1. Check user subscription level
+2. Validate ghost_mode is Premium-only (raise exception if free user tries to enable)
+3. UPSERT user_settings (insert if not exists, update if exists)
+4. NULL parameters = keep existing value
+5. Return updated settings
+
+---
+
+## API ENDPOINTS SPECIFICATION
+
+### Base URL
+```
+/api/v1/notifications
+```
+
+### Authentication
+All endpoints require JWT token:
+```
+Authorization: Bearer <access_token>
+```
+
+---
+
+## ENDPOINT 1: GET /notifications
+**Purpose**: Get paginated list of user's notifications
+
+### Request
+```http
+GET /api/v1/notifications?status=unread&type=activity_invite&limit=20&offset=0
+```
+
+### Query Parameters
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| status | string | No | null | Filter by status: 'unread', 'read', 'archived' |
+| type | string | No | null | Filter by notification_type (see ENUM) |
+| limit | integer | No | 20 | Page size (1-100) |
+| offset | integer | No | 0 | Pagination offset |
+
+### Stored Procedure Mapping
+```python
+result = await db.execute(
+    "SELECT * FROM activity.sp_get_user_notifications($1, $2, $3, $4, $5, $6)",
+    user_id,                                      # From JWT token
+    status,                                       # Query param (nullable)
+    notification_type,                            # Query param (nullable)
+    limit,                                        # Query param
+    offset,                                       # Query param
+    include_premium_only                          # True if Premium, False if Free
+)
+```
+
+### Response (200 OK)
+```json
+{
+  "notifications": [
+    {
+      "notification_id": "550e8400-e29b-41d4-a716-446655440000",
+      "user_id": "660e8400-e29b-41d4-a716-446655440000",
+      "actor": {
+        "user_id": "770e8400-e29b-41d4-a716-446655440000",
+        "username": "john_doe",
+        "first_name": "John",
+        "main_photo_url": "https://cdn.example.com/photos/john.jpg"
+      },
+      "notification_type": "activity_invite",
+      "target_type": "activity",
+      "target_id": "880e8400-e29b-41d4-a716-446655440000",
+      "title": "John invited you to Coffee Meetup",
+      "message": "You've been invited to join 'Sunday Morning Coffee' on Feb 15 at 10:00 AM",
+      "status": "unread",
+      "created_at": "2025-02-10T14:30:00Z",
+      "read_at": null,
+      "payload": {
+        "activity_title": "Sunday Morning Coffee",
+        "activity_date": "2025-02-15T10:00:00Z"
+      }
+    }
+  ],
+  "pagination": {
+    "total": 47,
+    "limit": 20,
+    "offset": 0,
+    "has_more": true
+  }
+}
+```
+
+### Error Responses
+
+**401 Unauthorized** - Invalid/expired token
+```json
+{
+  "detail": "Invalid authentication credentials"
+}
+```
+
+**422 Validation Error** - Invalid query parameters
+```json
+{
+  "detail": [
+    {
+      "loc": ["query", "limit"],
+      "msg": "ensure this value is less than or equal to 100",
+      "type": "value_error.number.not_le"
+    }
+  ]
+}
+```
+
+### Implementation Notes
+1. Extract user_id from JWT token
+2. Determine subscription level from token or database
+3. Set include_premium_only = (subscription_level != 'free')
+4. Call stored procedure with all parameters
+5. Format response with pagination metadata
+6. total_count comes from stored procedure (window function)
+
+---
+
+## ENDPOINT 2: GET /notifications/{notification_id}
+**Purpose**: Get single notification by ID
+
+### Request
+```http
+GET /api/v1/notifications/550e8400-e29b-41d4-a716-446655440000
+```
+
+### Path Parameters
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| notification_id | UUID | Yes | Notification ID |
+
+### Stored Procedure Mapping
+```python
+result = await db.execute(
+    "SELECT * FROM activity.sp_get_notification_by_id($1, $2)",
+    user_id,              # From JWT token
+    notification_id       # From path parameter
+)
+```
+
+### Response (200 OK)
+```json
+{
+  "notification_id": "550e8400-e29b-41d4-a716-446655440000",
+  "user_id": "660e8400-e29b-41d4-a716-446655440000",
+  "actor": {
+    "user_id": "770e8400-e29b-41d4-a716-446655440000",
+    "username": "john_doe",
+    "first_name": "John",
+    "last_name": "Doe",
+    "main_photo_url": "https://cdn.example.com/photos/john.jpg"
+  },
+  "notification_type": "activity_invite",
+  "target_type": "activity",
+  "target_id": "880e8400-e29b-41d4-a716-446655440000",
+  "title": "John invited you to Coffee Meetup",
+  "message": "You've been invited to join 'Sunday Morning Coffee' on Feb 15 at 10:00 AM",
+  "status": "unread",
+  "created_at": "2025-02-10T14:30:00Z",
+  "read_at": null,
+  "payload": {
+    "activity_title": "Sunday Morning Coffee",
+    "activity_date": "2025-02-15T10:00:00Z"
+  }
+}
+```
+
+### Error Responses
+
+**404 Not Found** - Notification doesn't exist or doesn't belong to user
+```json
+{
+  "detail": "Notification not found"
+}
+```
+
+**401 Unauthorized** - Invalid token
+```json
+{
+  "detail": "Invalid authentication credentials"
+}
+```
+
+### Implementation Notes
+1. Extract user_id from JWT token
+2. Call stored procedure
+3. Catch NOTIFICATION_NOT_FOUND exception → return 404
+4. Format single notification response
+
+---
+
+## ENDPOINT 3: PATCH /notifications/{notification_id}/read
+**Purpose**: Mark single notification as read
+
+### Request
+```http
+PATCH /api/v1/notifications/550e8400-e29b-41d4-a716-446655440000/read
+```
+
+### Path Parameters
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| notification_id | UUID | Yes | Notification ID |
+
+### Request Body
+None (empty body)
+
+### Stored Procedure Mapping
+```python
+result = await db.execute(
+    "SELECT * FROM activity.sp_mark_notification_as_read($1, $2)",
+    user_id,              # From JWT token
+    notification_id       # From path parameter
+)
+```
+
+### Response (200 OK)
+```json
+{
+  "notification_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "read",
+  "read_at": "2025-02-10T15:45:00Z"
+}
+```
+
+### Error Responses
+
+**404 Not Found** - Notification doesn't exist
+```json
+{
+  "detail": "Notification not found"
+}
+```
+
+**403 Forbidden** - Notification belongs to another user
+```json
+{
+  "detail": "You don't have permission to modify this notification"
+}
+```
+
+### Implementation Notes
+1. Extract user_id from JWT token
+2. Call stored procedure
+3. Catch NOTIFICATION_NOT_FOUND → 404
+4. Catch UNAUTHORIZED_ACCESS → 403
+5. Operation is idempotent (can call multiple times)
+
+---
+
+## ENDPOINT 4: POST /notifications/mark-read
+**Purpose**: Mark multiple notifications as read (bulk operation)
+
+### Request
+```http
+POST /api/v1/notifications/mark-read
+Content-Type: application/json
+```
+
+### Request Body (Option 1: Specific IDs)
+```json
+{
+  "notification_ids": [
+    "550e8400-e29b-41d4-a716-446655440000",
+    "660e8400-e29b-41d4-a716-446655440000",
+    "770e8400-e29b-41d4-a716-446655440000"
+  ]
+}
+```
+
+### Request Body (Option 2: Mark all unread)
+```json
+{
+  "mark_all": true
+}
+```
+
+### Request Body (Option 3: Mark all of specific type)
+```json
+{
+  "mark_all": true,
+  "notification_type": "activity_invite"
+}
+```
+
+### Request Schema
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| notification_ids | array[UUID] | No | Specific notification IDs to mark |
+| mark_all | boolean | No | Mark all unread notifications |
+| notification_type | string | No | Filter by type (requires mark_all=true) |
+
+### Stored Procedure Mapping
+```python
+result = await db.execute(
+    "SELECT * FROM activity.sp_mark_notifications_as_read_bulk($1, $2, $3)",
+    user_id,                    # From JWT token
+    notification_ids or None,   # Array or NULL
+    notification_type or None   # String or NULL
+)
+```
+
+### Response (200 OK)
+```json
+{
+  "updated_count": 15,
+  "message": "15 notifications marked as read"
+}
+```
+
+### Error Responses
+
+**400 Bad Request** - Invalid request (e.g., notification_type without mark_all)
+```json
+{
+  "detail": "notification_type requires mark_all=true"
+}
+```
+
+**422 Validation Error** - Invalid notification IDs
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "notification_ids", 0],
+      "msg": "value is not a valid uuid",
+      "type": "type_error.uuid"
+    }
+  ]
+}
+```
+
+### Implementation Notes
+1. Extract user_id from JWT token
+2. Validate request body logic:
+   - If notification_ids provided: use those IDs
+   - If mark_all=true: pass NULL for IDs
+   - If notification_type provided: requires mark_all=true
+3. Call stored procedure
+4. Return count of updated notifications
+
+---
+
+## ENDPOINT 5: DELETE /notifications/{notification_id}
+**Purpose**: Archive or delete notification
+
+### Request
+```http
+DELETE /api/v1/notifications/550e8400-e29b-41d4-a716-446655440000?permanent=false
+```
+
+### Path Parameters
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| notification_id | UUID | Yes | Notification ID |
+
+### Query Parameters
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| permanent | boolean | No | false | True = hard delete, False = archive |
+
+### Stored Procedure Mapping
+```python
+result = await db.execute(
+    "SELECT * FROM activity.sp_delete_notification($1, $2, $3)",
+    user_id,              # From JWT token
+    notification_id,      # From path parameter
+    permanent             # From query parameter
+)
+```
+
+### Response (200 OK - Archived)
+```json
+{
+  "success": true,
+  "message": "Notification archived"
+}
+```
+
+### Response (200 OK - Deleted)
+```json
+{
+  "success": true,
+  "message": "Notification permanently deleted"
+}
+```
+
+### Error Responses
+
+**404 Not Found**
+```json
+{
+  "detail": "Notification not found"
+}
+```
+
+**403 Forbidden**
+```json
+{
+  "detail": "You don't have permission to delete this notification"
+}
+```
+
+### Implementation Notes
+1. Extract user_id from JWT token
+2. Call stored procedure with permanent flag
+3. Catch NOTIFICATION_NOT_FOUND → 404
+4. Catch UNAUTHORIZED_ACCESS → 403
+5. Default behavior is archive (soft delete)
+
+---
+
+## ENDPOINT 6: GET /notifications/unread/count
+**Purpose**: Get count of unread notifications by type
+
+### Request
+```http
+GET /api/v1/notifications/unread/count
+```
+
+### Query Parameters
+None
+
+### Stored Procedure Mapping
+```python
+result = await db.execute(
+    "SELECT * FROM activity.sp_get_unread_count($1, $2)",
+    user_id,                    # From JWT token
+    include_premium_only        # True if Premium, False if Free
+)
+```
+
+### Response (200 OK)
+```json
+{
+  "total_unread": 23,
+  "by_type": {
+    "activity_invite": 5,
+    "activity_reminder": 3,
+    "activity_update": 2,
+    "community_invite": 1,
+    "new_member": 0,
+    "new_post": 8,
+    "comment": 3,
+    "reaction": 1,
+    "mention": 0,
+    "profile_view": 0,
+    "new_favorite": 0,
+    "system": 0
+  }
+}
+```
+
+### Response (200 OK - Free User)
+```json
+{
+  "total_unread": 23,
+  "by_type": {
+    "activity_invite": 5,
+    "activity_reminder": 3,
+    "activity_update": 2,
+    "community_invite": 1,
+    "new_member": 0,
+    "new_post": 8,
+    "comment": 3,
+    "reaction": 1,
+    "mention": 0,
+    "system": 0
+  },
+  "note": "Premium-exclusive notification types (profile_view, new_favorite) are not included"
+}
+```
+
+### Implementation Notes
+1. Extract user_id from JWT token
+2. Determine subscription level
+3. Set include_premium_only based on subscription
+4. Call stored procedure
+5. Format response with all counts
+6. Add note for free users about missing types
+
+---
+
+## ENDPOINT 7: GET /notifications/settings
+**Purpose**: Get user's notification preferences
+
+### Request
+```http
+GET /api/v1/notifications/settings
+```
+
+### Query Parameters
+None
+
+### Stored Procedure Mapping
+```python
+result = await db.execute(
+    "SELECT * FROM activity.sp_get_notification_settings($1)",
+    user_id              # From JWT token
+)
+```
+
+### Response (200 OK)
+```json
+{
+  "user_id": "660e8400-e29b-41d4-a716-446655440000",
+  "email_notifications": true,
+  "push_notifications": true,
+  "activity_reminders": true,
+  "community_updates": true,
+  "friend_requests": true,
+  "marketing_emails": false,
+  "ghost_mode": false,
+  "language": "en",
+  "timezone": "America/New_York"
+}
+```
+
+### Implementation Notes
+1. Extract user_id from JWT token
+2. Call stored procedure
+3. Returns defaults if user_settings row doesn't exist
+4. ghost_mode indicates Premium feature availability
+
+---
+
+## ENDPOINT 8: PATCH /notifications/settings
+**Purpose**: Update user's notification preferences
+
+### Request
+```http
+PATCH /api/v1/notifications/settings
+Content-Type: application/json
+```
+
+### Request Body
+```json
+{
+  "email_notifications": true,
+  "push_notifications": false,
+  "activity_reminders": true,
+  "community_updates": true,
+  "friend_requests": true,
+  "marketing_emails": false,
+  "ghost_mode": true,
+  "language": "en",
+  "timezone": "Europe/Amsterdam"
+}
+```
+
+### Request Schema
+All fields optional (only send fields to update):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| email_notifications | boolean | Enable email notifications |
+| push_notifications | boolean | Enable push notifications |
+| activity_reminders | boolean | Activity reminder notifications |
+| community_updates | boolean | Community update notifications |
+| friend_requests | boolean | Friend request notifications |
+| marketing_emails | boolean | Marketing email opt-in |
+| ghost_mode | boolean | Ghost mode (PREMIUM ONLY) |
+| language | string | ISO 639-1 language code |
+| timezone | string | IANA timezone string |
+
+### Stored Procedure Mapping
+```python
+result = await db.execute(
+    """SELECT * FROM activity.sp_update_notification_settings(
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+    )""",
+    user_id,                      # From JWT token
+    email_notifications,          # From body (nullable)
+    push_notifications,           # From body (nullable)
+    activity_reminders,           # From body (nullable)
+    community_updates,            # From body (nullable)
+    friend_requests,              # From body (nullable)
+    marketing_emails,             # From body (nullable)
+    ghost_mode,                   # From body (nullable)
+    language,                     # From body (nullable)
+    timezone                      # From body (nullable)
+)
+```
+
+### Response (200 OK)
+```json
+{
+  "user_id": "660e8400-e29b-41d4-a716-446655440000",
+  "email_notifications": true,
+  "push_notifications": false,
+  "activity_reminders": true,
+  "community_updates": true,
+  "friend_requests": true,
+  "marketing_emails": false,
+  "ghost_mode": true,
+  "language": "en",
+  "timezone": "Europe/Amsterdam",
+  "updated_at": "2025-02-10T16:00:00Z"
+}
+```
+
+### Error Responses
+
+**403 Forbidden** - Free user trying to enable ghost_mode
+```json
+{
+  "detail": "Premium subscription required to enable Ghost Mode"
+}
+```
+
+**422 Validation Error** - Invalid timezone
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "timezone"],
+      "msg": "Invalid timezone string",
+      "type": "value_error"
+    }
+  ]
+}
+```
+
+### Implementation Notes
+1. Extract user_id from JWT token
+2. Validate timezone format (IANA timezone database)
+3. Validate language code (ISO 639-1)
+4. Call stored procedure with all nullable parameters
+5. Catch PREMIUM_FEATURE_REQUIRED → 403
+6. NULL parameters keep existing values (partial update)
+7. Return updated settings
+
+---
+
+## ENDPOINT 9: POST /notifications (Internal - Service-to-Service)
+**Purpose**: Create new notification (called by other services)
+
+### Request
+```http
+POST /api/v1/notifications
+Content-Type: application/json
+X-Service-Token: <internal_service_token>
+```
+
+### Request Body
+```json
+{
+  "user_id": "660e8400-e29b-41d4-a716-446655440000",
+  "actor_user_id": "770e8400-e29b-41d4-a716-446655440000",
+  "notification_type": "activity_invite",
+  "target_type": "activity",
+  "target_id": "880e8400-e29b-41d4-a716-446655440000",
+  "title": "John invited you to Coffee Meetup",
+  "message": "You've been invited to join 'Sunday Morning Coffee' on Feb 15 at 10:00 AM",
+  "payload": {
+    "activity_title": "Sunday Morning Coffee",
+    "activity_date": "2025-02-15T10:00:00Z"
+  }
+}
+```
+
+### Request Schema
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| user_id | UUID | Yes | Notification recipient |
+| actor_user_id | UUID | No | User who triggered notification (NULL for system) |
+| notification_type | string | Yes | Type from ENUM |
+| target_type | string | Yes | 'activity', 'post', 'comment', 'user' |
+| target_id | UUID | Yes | ID of target object |
+| title | string | Yes | Notification title (max 255 chars) |
+| message | string | No | Optional detailed message |
+| payload | object | No | Additional JSON data |
+
+### Authentication
+Internal service-to-service token:
+```
+X-Service-Token: <shared_secret>
+```
+
+### Stored Procedure Mapping
+```python
+result = await db.execute(
+    """SELECT * FROM activity.sp_create_notification(
+        $1, $2, $3, $4, $5, $6, $7, $8
+    )""",
+    user_id,              # From body
+    actor_user_id,        # From body (nullable)
+    notification_type,    # From body
+    target_type,          # From body
+    target_id,            # From body
+    title,                # From body
+    message,              # From body (nullable)
+    payload               # From body (nullable)
+)
+```
+
+### Response (201 Created)
+```json
+{
+  "notification_id": "550e8400-e29b-41d4-a716-446655440000",
+  "created_at": "2025-02-10T14:30:00Z",
+  "status": "created"
+}
+```
+
+### Response (200 OK - Not Created)
+```json
+{
+  "notification_id": null,
+  "created_at": null,
+  "status": "skipped",
+  "reason": "User has disabled this notification type"
+}
+```
+
+### Error Responses
+
+**401 Unauthorized** - Invalid service token
+```json
+{
+  "detail": "Invalid service token"
+}
+```
+
+**404 Not Found** - User doesn't exist
+```json
+{
+  "detail": "User not found or inactive"
+}
+```
+
+**422 Validation Error** - Invalid notification_type
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "notification_type"],
+      "msg": "value is not a valid enumeration member",
+      "type": "type_error.enum"
+    }
+  ]
+}
+```
+
+### Implementation Notes
+1. Validate X-Service-Token header (internal authentication)
+2. Validate all required fields
+3. Call stored procedure
+4. Stored procedure checks user preferences (may skip creation)
+5. Return 201 if created, 200 if skipped
+6. Optionally trigger email notification via Email API
+7. This endpoint should NOT be exposed to public internet (internal only)
+
+---
+
+## ERROR HANDLING
+
+### Standard Error Response Format
+All errors follow FastAPI's standard format:
+
+```json
+{
+  "detail": "Error message here"
+}
+```
+
+Or for validation errors:
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "field_name"],
+      "msg": "Error description",
+      "type": "error_type"
+    }
+  ]
+}
+```
+
+### HTTP Status Codes
+
+| Code | Meaning | When to Use |
+|------|---------|-------------|
+| 200 | OK | Successful GET/PATCH/DELETE |
+| 201 | Created | Successful POST (notification created) |
+| 400 | Bad Request | Invalid request logic (e.g., contradictory params) |
+| 401 | Unauthorized | Invalid/missing JWT token |
+| 403 | Forbidden | Valid token but insufficient permissions (e.g., free user trying ghost_mode) |
+| 404 | Not Found | Resource doesn't exist |
+| 422 | Unprocessable Entity | Validation errors (invalid UUID, enum, etc.) |
+| 500 | Internal Server Error | Unexpected errors (log and alert) |
+
+### Stored Procedure Exception Mapping
+
+Map PostgreSQL exceptions to HTTP status codes:
+
+```python
+EXCEPTION_MAPPING = {
+    "NOTIFICATION_NOT_FOUND": 404,
+    "USER_NOT_FOUND": 404,
+    "USER_NOT_FOUND_OR_INACTIVE": 404,
+    "UNAUTHORIZED_ACCESS": 403,
+    "PREMIUM_FEATURE_REQUIRED": 403,
+}
+
+def handle_db_exception(e: Exception) -> tuple[int, str]:
+    """Map database exceptions to HTTP status codes"""
+    error_message = str(e)
+    
+    for exception_name, status_code in EXCEPTION_MAPPING.items():
+        if exception_name in error_message:
+            # Clean error message
+            clean_message = error_message.replace(f"{exception_name}: ", "")
+            return status_code, clean_message
+    
+    # Unknown error - log and return 500
+    logger.error(f"Unexpected database error: {error_message}")
+    return 500, "Internal server error"
+```
+
+### Validation Error Examples
+
+**Invalid UUID Format**
+```json
+{
+  "detail": [
+    {
+      "loc": ["path", "notification_id"],
+      "msg": "value is not a valid uuid",
+      "type": "type_error.uuid"
+    }
+  ]
+}
+```
+
+**Invalid Enum Value**
+```json
+{
+  "detail": [
+    {
+      "loc": ["query", "status"],
+      "msg": "value is not a valid enumeration member; permitted: 'unread', 'read', 'archived'",
+      "type": "type_error.enum"
+    }
+  ]
+}
+```
+
+**Invalid Range**
+```json
+{
+  "detail": [
+    {
+      "loc": ["query", "limit"],
+      "msg": "ensure this value is less than or equal to 100",
+      "type": "value_error.number.not_le"
+    }
+  ]
+}
+```
+
+---
+
+## PYDANTIC MODELS (Request/Response Schemas)
+
+### Enums
+```python
+from enum import Enum
+
+class NotificationType(str, Enum):
+    ACTIVITY_INVITE = "activity_invite"
+    ACTIVITY_REMINDER = "activity_reminder"
+    ACTIVITY_UPDATE = "activity_update"
+    COMMUNITY_INVITE = "community_invite"
+    NEW_MEMBER = "new_member"
+    NEW_POST = "new_post"
+    COMMENT = "comment"
+    REACTION = "reaction"
+    MENTION = "mention"
+    PROFILE_VIEW = "profile_view"
+    NEW_FAVORITE = "new_favorite"
+    SYSTEM = "system"
+
+class NotificationStatus(str, Enum):
+    UNREAD = "unread"
+    READ = "read"
+    ARCHIVED = "archived"
+```
+
+### Response Models
+```python
+from pydantic import BaseModel, Field, UUID4
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+
+class ActorInfo(BaseModel):
+    """Actor who triggered the notification"""
+    user_id: UUID4
+    username: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    main_photo_url: Optional[str] = None
+
+class NotificationResponse(BaseModel):
+    """Single notification response"""
+    notification_id: UUID4
+    user_id: UUID4
+    actor: Optional[ActorInfo] = None
+    notification_type: NotificationType
+    target_type: str
+    target_id: UUID4
+    title: str
+    message: Optional[str] = None
+    status: NotificationStatus
+    created_at: datetime
+    read_at: Optional[datetime] = None
+    payload: Optional[Dict[str, Any]] = None
+
+class PaginationMeta(BaseModel):
+    """Pagination metadata"""
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+class NotificationListResponse(BaseModel):
+    """Paginated notification list"""
+    notifications: List[NotificationResponse]
+    pagination: PaginationMeta
+
+class UnreadCountResponse(BaseModel):
+    """Unread notification counts"""
+    total_unread: int
+    by_type: Dict[str, int]
+    note: Optional[str] = None  # For free users
+
+class NotificationSettingsResponse(BaseModel):
+    """User notification settings"""
+    user_id: UUID4
+    email_notifications: bool
+    push_notifications: bool
+    activity_reminders: bool
+    community_updates: bool
+    friend_requests: bool
+    marketing_emails: bool
+    ghost_mode: bool
+    language: str
+    timezone: str
+    updated_at: Optional[datetime] = None
+
+class MarkReadResponse(BaseModel):
+    """Bulk mark-read response"""
+    updated_count: int
+    message: str
+
+class DeleteResponse(BaseModel):
+    """Delete/archive response"""
+    success: bool
+    message: str
+```
+
+### Request Models
+```python
+class MarkReadBulkRequest(BaseModel):
+    """Bulk mark-read request"""
+    notification_ids: Optional[List[UUID4]] = None
+    mark_all: Optional[bool] = False
+    notification_type: Optional[NotificationType] = None
+    
+    class Config:
+        # Validate that notification_type requires mark_all=true
+        @validator('notification_type')
+        def check_type_requires_mark_all(cls, v, values):
+            if v is not None and not values.get('mark_all'):
+                raise ValueError('notification_type requires mark_all=true')
+            return v
+
+class UpdateSettingsRequest(BaseModel):
+    """Update notification settings (all fields optional)"""
+    email_notifications: Optional[bool] = None
+    push_notifications: Optional[bool] = None
+    activity_reminders: Optional[bool] = None
+    community_updates: Optional[bool] = None
+    friend_requests: Optional[bool] = None
+    marketing_emails: Optional[bool] = None
+    ghost_mode: Optional[bool] = None
+    language: Optional[str] = None
+    timezone: Optional[str] = None
+
+class CreateNotificationRequest(BaseModel):
+    """Create notification (internal service)"""
+    user_id: UUID4
+    actor_user_id: Optional[UUID4] = None
+    notification_type: NotificationType
+    target_type: str = Field(..., regex="^(activity|post|comment|user)$")
+    target_id: UUID4
+    title: str = Field(..., max_length=255)
+    message: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
+```
+
+---
+
+## RATE LIMITING
+
+### Rate Limit Rules
+```python
+RATE_LIMITS = {
+    "GET /notifications": "100/minute",
+    "GET /notifications/{id}": "100/minute",
+    "PATCH /notifications/{id}/read": "100/minute",
+    "POST /notifications/mark-read": "20/minute",
+    "DELETE /notifications/{id}": "50/minute",
+    "GET /notifications/unread/count": "100/minute",
+    "GET /notifications/settings": "50/minute",
+    "PATCH /notifications/settings": "10/minute",
+    "POST /notifications": "1000/minute",  # Internal service (higher limit)
+}
+```
+
+### Implementation
+Use Redis-backed rate limiting (similar to Auth API):
+```python
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+limiter = Limiter(key_func=get_remote_address)
+
+@app.get("/notifications")
+@limiter.limit("100/minute")
+async def get_notifications(...):
+    ...
+```
+
+---
+
+## LOGGING & MONITORING
+
+### Log Levels
+- **INFO**: Normal operations (notification created, settings updated)
+- **WARNING**: Skipped notifications (user preferences), rate limit hits
+- **ERROR**: Database errors, validation failures
+- **CRITICAL**: System failures, data corruption
+
+### Metrics to Track
+1. **Notification Creation Rate**: notifications_created_total (by type)
+2. **Notification Read Rate**: notifications_read_total (by type)
+3. **Unread Count Distribution**: unread_notifications_histogram
+4. **Settings Update Rate**: settings_updated_total
+5. **Error Rate**: errors_total (by endpoint and error type)
+6. **Response Time**: request_duration_seconds (by endpoint)
+7. **Premium Feature Usage**: premium_feature_usage (ghost_mode, profile_view, favorite)
+
+### Example Log Entries
+```python
+# Notification created
+logger.info(
+    "Notification created",
+    extra={
+        "notification_id": str(notification_id),
+        "user_id": str(user_id),
+        "type": notification_type,
+        "actor_id": str(actor_user_id)
+    }
+)
+
+# Notification skipped due to user preferences
+logger.warning(
+    "Notification skipped - user preferences",
+    extra={
+        "user_id": str(user_id),
+        "type": notification_type,
+        "reason": "activity_reminders disabled"
+    }
+)
+
+# Premium feature blocked for free user
+logger.warning(
+    "Premium feature blocked",
+    extra={
+        "user_id": str(user_id),
+        "feature": "ghost_mode",
+        "subscription_level": "free"
+    }
+)
+```
+
+---
+
+## DATABASE CONNECTION
+
+### Connection Pool Configuration
+```python
+import asyncpg
+
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", 5432)),
+    "database": os.getenv("DB_NAME", "activity_platform"),
+    "user": os.getenv("DB_USER", "api_user"),
+    "password": os.getenv("DB_PASSWORD"),
+    "min_size": 10,
+    "max_size": 100,
+    "command_timeout": 60,
+}
+
+async def create_db_pool():
+    """Create database connection pool"""
+    return await asyncpg.create_pool(**DB_CONFIG)
+```
+
+### Query Execution Pattern
+```python
+async def execute_stored_procedure(
+    pool: asyncpg.Pool,
+    procedure_name: str,
+    *args
+) -> List[asyncpg.Record]:
+    """Execute stored procedure with error handling"""
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.fetch(
+                f"SELECT * FROM {procedure_name}({', '.join(['$' + str(i) for i in range(1, len(args) + 1)])})",
+                *args
+            )
+            return result
+        except asyncpg.PostgresError as e:
+            # Map to HTTP exception
+            status_code, message = handle_db_exception(e)
+            raise HTTPException(status_code=status_code, detail=message)
+```
+
+---
+
+## TESTING CHECKLIST
+
+### Unit Tests
+- [ ] All stored procedures tested in isolation
+- [ ] Pydantic models validate correctly
+- [ ] Error handling covers all exception types
+- [ ] Rate limiting works as expected
+
+### Integration Tests
+- [ ] GET /notifications returns correct data
+- [ ] Pagination works correctly
+- [ ] Filtering by status/type works
+- [ ] Premium-only notifications hidden for free users
+- [ ] Mark-read operations work (single + bulk)
+- [ ] Settings CRUD operations work
+- [ ] Ghost mode validation enforces Premium requirement
+- [ ] Internal notification creation endpoint works
+
+### Security Tests
+- [ ] JWT token validation works
+- [ ] User can only access own notifications
+- [ ] Service-to-service auth works
+- [ ] SQL injection attempts blocked (by using stored procedures)
+- [ ] Rate limiting prevents abuse
+
+### Performance Tests
+- [ ] Endpoints respond within 200ms (p95)
+- [ ] Database queries use indexes
+- [ ] Connection pool handles load
+- [ ] No N+1 query problems
+
+---
+
+## DEPLOYMENT CONFIGURATION
+
+### Environment Variables
+```bash
+# Database
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=activity_platform
+DB_USER=api_user
+DB_PASSWORD=<secret>
+
+# JWT
+JWT_SECRET=<secret>
+JWT_ALGORITHM=HS256
+
+# Internal Service Auth
+SERVICE_TOKEN=<shared_secret>
+
+# Rate Limiting (Redis)
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_PASSWORD=<secret>
+
+# Email API (for notification delivery)
+EMAIL_API_URL=http://email-api:8000
+EMAIL_API_KEY=<secret>
+
+# Monitoring
+SENTRY_DSN=<sentry_url>
+LOG_LEVEL=INFO
+```
+
+### Docker Compose Example
+```yaml
+version: '3.8'
+services:
+  notifications-api:
+    build: .
+    ports:
+      - "8003:8000"
+    environment:
+      - DB_HOST=postgres
+      - REDIS_HOST=redis
+      - EMAIL_API_URL=http://email-api:8000
+    depends_on:
+      - postgres
+      - redis
+```
+
+---
+
+## API SUMMARY TABLE
+
+| Method | Endpoint | Purpose | SP Called | Auth |
+|--------|----------|---------|-----------|------|
+| GET | /notifications | List notifications | sp_get_user_notifications | JWT |
+| GET | /notifications/{id} | Get single notification | sp_get_notification_by_id | JWT |
+| PATCH | /notifications/{id}/read | Mark as read | sp_mark_notification_as_read | JWT |
+| POST | /notifications/mark-read | Bulk mark read | sp_mark_notifications_as_read_bulk | JWT |
+| DELETE | /notifications/{id} | Archive/delete | sp_delete_notification | JWT |
+| GET | /notifications/unread/count | Get unread counts | sp_get_unread_count | JWT |
+| GET | /notifications/settings | Get settings | sp_get_notification_settings | JWT |
+| PATCH | /notifications/settings | Update settings | sp_update_notification_settings | JWT |
+| POST | /notifications | Create notification | sp_create_notification | Service Token |
+
+---
+
+## IMPLEMENTATION PRIORITY ORDER
+
+### Phase 1: Core Functionality (Week 1)
+1. Database connection setup
+2. JWT authentication middleware
+3. GET /notifications (list)
+4. GET /notifications/{id} (single)
+5. PATCH /notifications/{id}/read (mark read)
+6. GET /notifications/unread/count
+
+### Phase 2: Bulk Operations (Week 1)
+7. POST /notifications/mark-read (bulk)
+8. DELETE /notifications/{id} (archive)
+
+### Phase 3: Settings (Week 2)
+9. GET /notifications/settings
+10. PATCH /notifications/settings (with Premium validation)
+
+### Phase 4: Internal API (Week 2)
+11. POST /notifications (service-to-service)
+12. Email notification integration
+
+### Phase 5: Polish (Week 3)
+13. Rate limiting
+14. Comprehensive error handling
+15. Logging & monitoring
+16. Performance optimization
+
+---
+
+## FINAL AI IMPLEMENTATION NOTES
+
+### Critical Success Factors
+1. **100% Stored Procedures**: NEVER write raw SQL in Python code
+2. **Security First**: Always validate user_id from JWT matches resource owner
+3. **Premium Checks**: Enforce subscription level in stored procedures
+4. **Idempotent Operations**: Mark-read should be safe to call multiple times
+5. **Proper Error Mapping**: Map PostgreSQL exceptions to HTTP status codes
+
+### Common Pitfalls to Avoid
+1. ❌ Don't query database directly (always use stored procedures)
+2. ❌ Don't trust client-provided user_id (extract from JWT)
+3. ❌ Don't skip subscription level checks
+4. ❌ Don't expose internal service endpoint to public
+5. ❌ Don't return sensitive data (actor's email, etc.)
+
+### Code Quality Checklist
+- [ ] Type hints on all functions
+- [ ] Docstrings on all endpoints
+- [ ] Error handling for all database calls
+- [ ] Logging at appropriate levels
+- [ ] Input validation with Pydantic
+- [ ] Response models match stored procedure output
+- [ ] Tests cover happy path + error cases
+
+---
+
+## APPENDIX: FULL ENDPOINT CURL EXAMPLES
+
+```bash
+# 1. Get notifications (paginated)
+curl -X GET "http://localhost:8003/api/v1/notifications?status=unread&limit=20&offset=0" \
+  -H "Authorization: Bearer <access_token>"
+
+# 2. Get single notification
+curl -X GET "http://localhost:8003/api/v1/notifications/550e8400-e29b-41d4-a716-446655440000" \
+  -H "Authorization: Bearer <access_token>"
+
+# 3. Mark single notification as read
+curl -X PATCH "http://localhost:8003/api/v1/notifications/550e8400-e29b-41d4-a716-446655440000/read" \
+  -H "Authorization: Bearer <access_token>"
+
+# 4. Bulk mark specific IDs as read
+curl -X POST "http://localhost:8003/api/v1/notifications/mark-read" \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "notification_ids": [
+      "550e8400-e29b-41d4-a716-446655440000",
+      "660e8400-e29b-41d4-a716-446655440000"
+    ]
+  }'
+
+# 5. Mark all unread as read
+curl -X POST "http://localhost:8003/api/v1/notifications/mark-read" \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"mark_all": true}'
+
+# 6. Archive notification
+curl -X DELETE "http://localhost:8003/api/v1/notifications/550e8400-e29b-41d4-a716-446655440000?permanent=false" \
+  -H "Authorization: Bearer <access_token>"
+
+# 7. Get unread count
+curl -X GET "http://localhost:8003/api/v1/notifications/unread/count" \
+  -H "Authorization: Bearer <access_token>"
+
+# 8. Get notification settings
+curl -X GET "http://localhost:8003/api/v1/notifications/settings" \
+  -H "Authorization: Bearer <access_token>"
+
+# 9. Update settings
+curl -X PATCH "http://localhost:8003/api/v1/notifications/settings" \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "push_notifications": false,
+    "ghost_mode": true,
+    "timezone": "Europe/Amsterdam"
+  }'
+
+# 10. Create notification (internal service)
+curl -X POST "http://localhost:8003/api/v1/notifications" \
+  -H "X-Service-Token: <service_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "660e8400-e29b-41d4-a716-446655440000",
+    "actor_user_id": "770e8400-e29b-41d4-a716-446655440000",
+    "notification_type": "activity_invite",
+    "target_type": "activity",
+    "target_id": "880e8400-e29b-41d4-a716-446655440000",
+    "title": "New activity invitation",
+    "message": "John invited you to Coffee Meetup"
+  }'
+```
+
+---
+
+## END OF SPECIFICATION
+
+This specification provides complete mapping between API endpoints and database stored procedures for AI implementation of the Notifications API. All business logic resides in PostgreSQL stored procedures, with the FastAPI layer handling routing, authentication, validation, and error handling.
