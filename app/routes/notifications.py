@@ -69,6 +69,20 @@ async def get_notifications(
         )
     )
 
+@router.get("/unread/count", response_model=UnreadCountResponse)
+async def get_unread_count(
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Get count of unread notifications by type.
+    """
+    include_premium = current_user.subscription_level != "free"
+
+    return await notification_service.get_unread_count(
+        user_id=UUID(current_user.user_id),
+        include_premium_only=include_premium
+    )
+
 @router.get("/{notification_id}", response_model=NotificationResponse)
 async def get_notification(
     notification_id: UUID = Path(...),
@@ -134,20 +148,6 @@ async def delete_notification(
         user_id=UUID(current_user.user_id),
         notification_id=notification_id,
         permanent=permanent
-    )
-
-@router.get("/unread/count", response_model=UnreadCountResponse)
-async def get_unread_count(
-    current_user: TokenData = Depends(get_current_user)
-):
-    """
-    Get count of unread notifications by type.
-    """
-    include_premium = current_user.subscription_level != "free"
-
-    return await notification_service.get_unread_count(
-        user_id=UUID(current_user.user_id),
-        include_premium_only=include_premium
     )
 
 @router.post("", response_model=CreateNotificationResponse, status_code=201)

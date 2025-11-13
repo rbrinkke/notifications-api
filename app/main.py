@@ -20,14 +20,17 @@ logger = structlog.get_logger()
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    docs_url="/docs" if settings.ENABLE_DOCS else None,
+    redoc_url="/redoc" if settings.ENABLE_DOCS else None
 )
 
 # Add CORS middleware
+cors_origins = ["*"] if settings.CORS_ORIGINS == "*" else [
+    origin.strip() for origin in settings.CORS_ORIGINS.split(",")
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for production
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

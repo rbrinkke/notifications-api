@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
 
+    # CORS
+    CORS_ORIGINS: str = "*"  # Comma-separated list of origins or "*"
+
+    # API Documentation
+    ENABLE_DOCS: bool = True
+
     @property
     def database_url(self) -> str:
         return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
