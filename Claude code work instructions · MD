@@ -1,0 +1,1837 @@
+ # CLAUDE CODE WORK INSTRUCTIONS: NOTIFICATIONS API
+## AI Agent Implementation Guide
+
+---
+
+## OBJECTIVE
+Build a complete FastAPI Notifications API from scratch following the specifications in `NOTIFICATIONS_API_SPECIFICATION.md`. All business logic lives in PostgreSQL stored procedures. The API is a thin routing layer with authentication, validation, and error handling.
+
+---
+
+## CRITICAL CONSTRAINTS FOR AI AGENT
+
+### DO NOT
+- ❌ Write raw SQL queries in Python code (use stored procedures ONLY)
+- ❌ Put business logic in Python (belongs in stored procedures)
+- ❌ Trust user_id from request body (extract from JWT token)
+- ❌ Skip subscription level checks (enforce in stored procedures)
+- ❌ Create database tables (they already exist in `sqlschema.sql`)
+- ❌ Deviate from the exact endpoint specifications
+
+### DO
+- ✅ Use 100% stored procedures for all database operations
+- ✅ Extract user_id from JWT token for authentication
+- ✅ Map PostgreSQL exceptions to HTTP status codes
+- ✅ Follow the exact project structure from `fastapi requirements`
+- ✅ Use Pydantic for all request/response validation
+- ✅ Implement all 9 endpoints from specification
+
+---
+
+## REFERENCE DOCUMENTS
+
+You have access to these documents in your context:
+1. **NOTIFICATIONS_API_SPECIFICATION.md** - Complete API specification (PRIMARY REFERENCE)
+2. **sqlschema.sql** - Database schema (tables already exist)
+3. **auth-api-specifications** - JWT token structure and auth patterns
+4. **fastapi requirements** - Project structure and best practices
+
+**IMPORTANT**: Read these documents carefully before starting. The specification document contains ALL endpoint details, stored procedure signatures, and error handling rules.
+
+---
+
+## PROJECT STRUCTURE TO CREATE
+
+```
+notifications-api/
+├── .env.example                    # Environment variable template
+├── .gitignore                      # Git ignore file
+├── requirements.txt                # Python dependencies
+├── Dockerfile                      # Container definition
+├── docker-compose.yml              # Local development setup
+├── README.md                       # API documentation
+│
+├── app/
+│   ├── __init__.py
+│   ├── main.py                     # FastAPI app + startup/shutdown
+│   ├── config.py                   # Settings (from BaseSettings)
+│   │
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── logging_config.py      # Structured logging setup
+│   │   ├── exceptions.py          # Custom exception classes
+│   │   ├── security.py            # JWT token validation
+│   │   └── database.py            # PostgreSQL connection pool
+│   │
+│   ├── middleware/
+│   │   ├── __init__.py
+│   │   └── correlation.py         # X-Trace-ID middleware
+│   │
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   ├── notifications.py       # Notification request/response models
+│   │   └── settings.py            # Settings request/response models
+│   │
+│   ├── services/
+│   │   ├── __init__.py
+│   │   ├── notification_service.py # Notification business logic
+│   │   └── settings_service.py    # Settings business logic
+│   │
+│   ├── routes/
+│   │   ├── __init__.py
+│   │   ├── notifications.py       # Notification endpoints
+│   │   ├── settings.py            # Settings endpoints
+│   │   └── health.py              # Health check endpoint
+│   │
+│   └── dependencies.py             # Shared FastAPI dependencies
+│
+└── tests/
+    ├── __init__.py
+    ├── test_notifications.py
+    └── test_settings.py
+```
+
+---
+
+## IMPLEMENTATION STEPS
+
+### PHASE 1: PROJECT SETUP
+
+#### Step 1.1: Create requirements.txt
+```txt
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+asyncpg==0.29.0
+python-jose[cryptography]==3.3.0
+structlog==23.2.0
+slowapi==0.1.9
+redis==5.0.1
+python-multipart==0.0.6
+```
+
+#### Step 1.2: Create .env.example
+```env
+# Database
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=activity_platform
+DB_USER=api_user
+DB_PASSWORD=changeme
+
+# JWT (from Auth API)
+JWT_SECRET=your-secret-key-here
+JWT_ALGORITHM=HS256
+
+# Internal Service Auth
+SERVICE_TOKEN=shared-secret-token
+
+# Redis (for rate limiting)
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_PASSWORD=
+
+# API Settings
+API_V1_PREFIX=/api/v1
+PROJECT_NAME=Notifications API
+ENVIRONMENT=development
+DEBUG=true
+LOG_LEVEL=INFO
+
+# Email API (optional)
+EMAIL_API_URL=http://email-api:8000
+EMAIL_API_KEY=email-api-key
+```
+
+#### Step 1.3: Create .gitignore
+```
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv/
+venv/
+*.log
+.pytest_cache/
+.coverage
+htmlcov/
+.DS_Store
+```
+
+---
+
+### PHASE 2: CORE INFRASTRUCTURE
+
+#### Step 2.1: app/config.py
+```python
+"""
+Configuration management using Pydantic Settings.
+Reads from environment variables and .env file.
+"""
+from pydantic_settings import BaseSettings
+from typing import Optional
+
+class Settings(BaseSettings):
+    # Environment
+    ENVIRONMENT: str = "development"
+    DEBUG: bool = False
+    
+    # API
+    API_V1_PREFIX: str = "/api/v1"
+    PROJECT_NAME: str = "Notifications API"
+    
+    # Database
+    DB_HOST: str
+    DB_PORT: int = 5432
+    DB_NAME: str
+    DB_USER: str
+    DB_PASSWORD: str
+    
+    # JWT
+    JWT_SECRET: str
+    JWT_ALGORITHM: str = "HS256"
+    
+    # Internal Service Auth
+    SERVICE_TOKEN: str
+    
+    # Redis
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_PASSWORD: Optional[str] = None
+    
+    # Email API (optional)
+    EMAIL_API_URL: Optional[str] = None
+    EMAIL_API_KEY: Optional[str] = None
+    
+    # Logging
+    LOG_LEVEL: str = "INFO"
+    
+    @property
+    def database_url(self) -> str:
+        return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+    
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+
+settings = Settings()
+```
+
+#### Step 2.2: app/core/database.py
+```python
+"""
+PostgreSQL connection pool management.
+Uses asyncpg for async database operations.
+"""
+import asyncpg
+from typing import Optional
+import structlog
+
+logger = structlog.get_logger()
+
+class Database:
+    def __init__(self):
+        self.pool: Optional[asyncpg.Pool] = None
+    
+    async def connect(self, database_url: str):
+        """Create database connection pool"""
+        try:
+            self.pool = await asyncpg.create_pool(
+                database_url,
+                min_size=10,
+                max_size=100,
+                command_timeout=60
+            )
+            logger.info("database_connected", pool_size=10)
+        except Exception as e:
+            logger.error("database_connection_failed", error=str(e))
+            raise
+    
+    async def disconnect(self):
+        """Close database connection pool"""
+        if self.pool:
+            await self.pool.close()
+            logger.info("database_disconnected")
+    
+    async def execute_sp(self, procedure_name: str, *args):
+        """
+        Execute stored procedure and return results.
+        
+        Args:
+            procedure_name: Full procedure name (e.g., 'activity.sp_get_user_notifications')
+            *args: Procedure parameters in order
+        
+        Returns:
+            List of Record objects from database
+        """
+        async with self.pool.acquire() as conn:
+            # Build parameter placeholders: $1, $2, $3, etc.
+            placeholders = ", ".join([f"${i+1}" for i in range(len(args))])
+            query = f"SELECT * FROM {procedure_name}({placeholders})"
+            
+            logger.debug(
+                "executing_stored_procedure",
+                procedure=procedure_name,
+                param_count=len(args)
+            )
+            
+            result = await conn.fetch(query, *args)
+            return result
+
+# Global database instance
+db = Database()
+```
+
+#### Step 2.3: app/core/security.py
+```python
+"""
+JWT token validation and user authentication.
+Extracts user_id and subscription_level from JWT tokens.
+"""
+from fastapi import HTTPException, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import jwt, JWTError
+from typing import Dict, Optional
+import structlog
+
+from app.config import settings
+
+logger = structlog.get_logger()
+security = HTTPBearer()
+
+class TokenData:
+    """Parsed JWT token data"""
+    def __init__(self, user_id: str, email: str, subscription_level: str = "free", org_id: Optional[str] = None):
+        self.user_id = user_id
+        self.email = email
+        self.subscription_level = subscription_level
+        self.org_id = org_id
+
+def verify_jwt_token(token: str) -> Dict:
+    """
+    Verify JWT token signature and expiration.
+    
+    Returns:
+        Dict with token payload
+    
+    Raises:
+        HTTPException: If token is invalid or expired
+    """
+    try:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET,
+            algorithms=[settings.JWT_ALGORITHM]
+        )
+        return payload
+    except JWTError as e:
+        logger.warning("invalid_jwt_token", error=str(e))
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication credentials"
+        )
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Security(security)
+) -> TokenData:
+    """
+    FastAPI dependency to extract and validate user from JWT token.
+    
+    Usage in routes:
+        async def endpoint(current_user: TokenData = Depends(get_current_user)):
+            user_id = current_user.user_id
+    """
+    token = credentials.credentials
+    payload = verify_jwt_token(token)
+    
+    # Extract required fields
+    user_id = payload.get("sub")
+    email = payload.get("email")
+    
+    if not user_id or not email:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    
+    # Extract optional fields
+    subscription_level = payload.get("subscription_level", "free")
+    org_id = payload.get("org_id")
+    
+    return TokenData(
+        user_id=user_id,
+        email=email,
+        subscription_level=subscription_level,
+        org_id=org_id
+    )
+
+def verify_service_token(token: str) -> bool:
+    """
+    Verify internal service-to-service token.
+    Used for POST /notifications endpoint.
+    """
+    return token == settings.SERVICE_TOKEN
+```
+
+#### Step 2.4: app/core/exceptions.py
+```python
+"""
+Custom exception classes and database error mapping.
+Maps PostgreSQL exceptions to HTTP status codes.
+"""
+from fastapi import HTTPException
+import structlog
+
+logger = structlog.get_logger()
+
+# Exception name -> HTTP status code mapping
+EXCEPTION_MAPPING = {
+    "NOTIFICATION_NOT_FOUND": 404,
+    "USER_NOT_FOUND": 404,
+    "USER_NOT_FOUND_OR_INACTIVE": 404,
+    "UNAUTHORIZED_ACCESS": 403,
+    "PREMIUM_FEATURE_REQUIRED": 403,
+}
+
+def handle_db_exception(e: Exception) -> HTTPException:
+    """
+    Map PostgreSQL exception to HTTPException.
+    
+    Args:
+        e: Exception from database
+    
+    Returns:
+        HTTPException with appropriate status code and message
+    """
+    error_message = str(e)
+    
+    # Check if error matches known exception patterns
+    for exception_name, status_code in EXCEPTION_MAPPING.items():
+        if exception_name in error_message:
+            # Clean error message
+            clean_message = error_message.split(": ", 1)[-1] if ": " in error_message else error_message
+            logger.warning(
+                "database_exception",
+                exception_type=exception_name,
+                status_code=status_code
+            )
+            return HTTPException(status_code=status_code, detail=clean_message)
+    
+    # Unknown error - log and return 500
+    logger.error("unexpected_database_error", error=error_message)
+    return HTTPException(status_code=500, detail="Internal server error")
+
+class AppException(HTTPException):
+    """Base exception for application errors"""
+    pass
+
+class ValidationException(AppException):
+    """Validation error (422)"""
+    def __init__(self, message: str):
+        super().__init__(status_code=422, detail=message)
+
+class NotFoundException(AppException):
+    """Resource not found (404)"""
+    def __init__(self, resource: str):
+        super().__init__(status_code=404, detail=f"{resource} not found")
+
+class UnauthorizedException(AppException):
+    """Unauthorized access (401)"""
+    def __init__(self, message: str = "Unauthorized"):
+        super().__init__(status_code=401, detail=message)
+
+class ForbiddenException(AppException):
+    """Forbidden access (403)"""
+    def __init__(self, message: str = "Forbidden"):
+        super().__init__(status_code=403, detail=message)
+```
+
+#### Step 2.5: app/core/logging_config.py
+```python
+"""
+Structured logging configuration with correlation IDs.
+Uses structlog for JSON logging in production.
+"""
+import structlog
+import logging
+
+def setup_logging(environment: str, log_level: str):
+    """
+    Configure structured logging.
+    
+    Args:
+        environment: "development" or "production"
+        log_level: "DEBUG", "INFO", "WARNING", "ERROR"
+    """
+    processors = [
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+    ]
+    
+    if environment == "production":
+        processors.append(structlog.processors.JSONRenderer())
+    else:
+        processors.append(structlog.dev.ConsoleRenderer())
+    
+    structlog.configure(
+        processors=processors,
+        wrapper_class=structlog.stdlib.BoundLogger,
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+    
+    # Set root logger level
+    logging.basicConfig(
+        format="%(message)s",
+        level=getattr(logging, log_level.upper())
+    )
+```
+
+#### Step 2.6: app/middleware/correlation.py
+```python
+"""
+Correlation ID middleware for request tracing.
+Adds X-Trace-ID header to all requests and responses.
+"""
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+import structlog
+import uuid
+
+class CorrelationMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Get or generate correlation ID
+        correlation_id = request.headers.get("X-Trace-ID") or str(uuid.uuid4())
+        
+        # Bind to structlog context
+        structlog.contextvars.bind_contextvars(correlation_id=correlation_id)
+        
+        # Process request
+        response = await call_next(request)
+        
+        # Add correlation ID to response headers
+        response.headers["X-Trace-ID"] = correlation_id
+        
+        # Clear context
+        structlog.contextvars.clear_contextvars()
+        
+        return response
+```
+
+---
+
+### PHASE 3: PYDANTIC SCHEMAS
+
+#### Step 3.1: app/schemas/notifications.py
+```python
+"""
+Pydantic models for notification requests and responses.
+These match the stored procedure return types.
+"""
+from pydantic import BaseModel, UUID4, Field
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+from enum import Enum
+
+class NotificationType(str, Enum):
+    """Notification type enum"""
+    ACTIVITY_INVITE = "activity_invite"
+    ACTIVITY_REMINDER = "activity_reminder"
+    ACTIVITY_UPDATE = "activity_update"
+    COMMUNITY_INVITE = "community_invite"
+    NEW_MEMBER = "new_member"
+    NEW_POST = "new_post"
+    COMMENT = "comment"
+    REACTION = "reaction"
+    MENTION = "mention"
+    PROFILE_VIEW = "profile_view"
+    NEW_FAVORITE = "new_favorite"
+    SYSTEM = "system"
+
+class NotificationStatus(str, Enum):
+    """Notification status enum"""
+    UNREAD = "unread"
+    READ = "read"
+    ARCHIVED = "archived"
+
+class ActorInfo(BaseModel):
+    """Actor who triggered the notification"""
+    user_id: UUID4
+    username: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    main_photo_url: Optional[str] = None
+
+class NotificationResponse(BaseModel):
+    """Single notification response"""
+    notification_id: UUID4
+    user_id: UUID4
+    actor: Optional[ActorInfo] = None
+    notification_type: NotificationType
+    target_type: str
+    target_id: UUID4
+    title: str
+    message: Optional[str] = None
+    status: NotificationStatus
+    created_at: datetime
+    read_at: Optional[datetime] = None
+    payload: Optional[Dict[str, Any]] = None
+
+class PaginationMeta(BaseModel):
+    """Pagination metadata"""
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+class NotificationListResponse(BaseModel):
+    """Paginated notification list"""
+    notifications: List[NotificationResponse]
+    pagination: PaginationMeta
+
+class UnreadCountResponse(BaseModel):
+    """Unread notification counts by type"""
+    total_unread: int
+    by_type: Dict[str, int]
+    note: Optional[str] = None
+
+class MarkReadBulkRequest(BaseModel):
+    """Bulk mark-read request"""
+    notification_ids: Optional[List[UUID4]] = None
+    mark_all: Optional[bool] = False
+    notification_type: Optional[NotificationType] = None
+
+class MarkReadResponse(BaseModel):
+    """Mark-read operation response"""
+    updated_count: int
+    message: str
+
+class DeleteResponse(BaseModel):
+    """Delete/archive operation response"""
+    success: bool
+    message: str
+
+class CreateNotificationRequest(BaseModel):
+    """Create notification request (internal service)"""
+    user_id: UUID4
+    actor_user_id: Optional[UUID4] = None
+    notification_type: NotificationType
+    target_type: str = Field(..., pattern="^(activity|post|comment|user)$")
+    target_id: UUID4
+    title: str = Field(..., max_length=255)
+    message: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
+
+class CreateNotificationResponse(BaseModel):
+    """Create notification response"""
+    notification_id: Optional[UUID4]
+    created_at: Optional[datetime]
+    status: str
+    reason: Optional[str] = None
+```
+
+#### Step 3.2: app/schemas/settings.py
+```python
+"""
+Pydantic models for user notification settings.
+"""
+from pydantic import BaseModel, UUID4
+from datetime import datetime
+from typing import Optional
+
+class NotificationSettingsResponse(BaseModel):
+    """User notification settings response"""
+    user_id: UUID4
+    email_notifications: bool
+    push_notifications: bool
+    activity_reminders: bool
+    community_updates: bool
+    friend_requests: bool
+    marketing_emails: bool
+    ghost_mode: bool
+    language: str
+    timezone: str
+    updated_at: Optional[datetime] = None
+
+class UpdateSettingsRequest(BaseModel):
+    """Update notification settings (all fields optional)"""
+    email_notifications: Optional[bool] = None
+    push_notifications: Optional[bool] = None
+    activity_reminders: Optional[bool] = None
+    community_updates: Optional[bool] = None
+    friend_requests: Optional[bool] = None
+    marketing_emails: Optional[bool] = None
+    ghost_mode: Optional[bool] = None
+    language: Optional[str] = None
+    timezone: Optional[str] = None
+```
+
+---
+
+### PHASE 4: SERVICES LAYER
+
+#### Step 4.1: app/services/notification_service.py
+```python
+"""
+Notification business logic service.
+Calls stored procedures and formats results.
+"""
+from typing import List, Optional
+from uuid import UUID
+import structlog
+
+from app.core.database import db
+from app.core.exceptions import handle_db_exception
+from app.schemas.notifications import (
+    NotificationResponse,
+    ActorInfo,
+    NotificationType,
+    NotificationStatus,
+    UnreadCountResponse,
+    MarkReadResponse,
+    DeleteResponse,
+    CreateNotificationResponse
+)
+
+logger = structlog.get_logger()
+
+class NotificationService:
+    """Service for notification operations"""
+    
+    async def get_user_notifications(
+        self,
+        user_id: UUID,
+        status: Optional[NotificationStatus],
+        notification_type: Optional[NotificationType],
+        limit: int,
+        offset: int,
+        include_premium_only: bool
+    ) -> tuple[List[NotificationResponse], int]:
+        """
+        Get paginated notifications for user.
+        
+        Calls: activity.sp_get_user_notifications
+        
+        Returns:
+            (notifications_list, total_count)
+        """
+        try:
+            # Convert enums to strings (or None)
+            status_str = status.value if status else None
+            type_str = notification_type.value if notification_type else None
+            
+            result = await db.execute_sp(
+                "activity.sp_get_user_notifications",
+                user_id,
+                status_str,
+                type_str,
+                limit,
+                offset,
+                include_premium_only
+            )
+            
+            if not result:
+                return [], 0
+            
+            # Get total count from first row (window function)
+            total_count = result[0]["total_count"] if result else 0
+            
+            # Format notifications
+            notifications = []
+            for row in result:
+                # Build actor info if present
+                actor = None
+                if row["actor_user_id"]:
+                    actor = ActorInfo(
+                        user_id=row["actor_user_id"],
+                        username=row["actor_username"],
+                        first_name=row["actor_first_name"],
+                        main_photo_url=row["actor_main_photo_url"]
+                    )
+                
+                notification = NotificationResponse(
+                    notification_id=row["notification_id"],
+                    user_id=row["user_id"],
+                    actor=actor,
+                    notification_type=row["notification_type"],
+                    target_type=row["target_type"],
+                    target_id=row["target_id"],
+                    title=row["title"],
+                    message=row["message"],
+                    status=row["status"],
+                    created_at=row["created_at"],
+                    read_at=row["read_at"],
+                    payload=row["payload"]
+                )
+                notifications.append(notification)
+            
+            logger.info(
+                "notifications_retrieved",
+                user_id=str(user_id),
+                count=len(notifications),
+                total=total_count
+            )
+            
+            return notifications, total_count
+            
+        except Exception as e:
+            raise handle_db_exception(e)
+    
+    async def get_notification_by_id(
+        self,
+        user_id: UUID,
+        notification_id: UUID
+    ) -> NotificationResponse:
+        """
+        Get single notification by ID.
+        
+        Calls: activity.sp_get_notification_by_id
+        """
+        try:
+            result = await db.execute_sp(
+                "activity.sp_get_notification_by_id",
+                user_id,
+                notification_id
+            )
+            
+            if not result:
+                raise Exception("NOTIFICATION_NOT_FOUND")
+            
+            row = result[0]
+            
+            # Build actor info if present
+            actor = None
+            if row["actor_user_id"]:
+                actor = ActorInfo(
+                    user_id=row["actor_user_id"],
+                    username=row["actor_username"],
+                    first_name=row["actor_first_name"],
+                    last_name=row["actor_last_name"],
+                    main_photo_url=row["actor_main_photo_url"]
+                )
+            
+            return NotificationResponse(
+                notification_id=row["notification_id"],
+                user_id=row["user_id"],
+                actor=actor,
+                notification_type=row["notification_type"],
+                target_type=row["target_type"],
+                target_id=row["target_id"],
+                title=row["title"],
+                message=row["message"],
+                status=row["status"],
+                created_at=row["created_at"],
+                read_at=row["read_at"],
+                payload=row["payload"]
+            )
+            
+        except Exception as e:
+            raise handle_db_exception(e)
+    
+    async def mark_as_read(
+        self,
+        user_id: UUID,
+        notification_id: UUID
+    ) -> dict:
+        """
+        Mark single notification as read.
+        
+        Calls: activity.sp_mark_notification_as_read
+        """
+        try:
+            result = await db.execute_sp(
+                "activity.sp_mark_notification_as_read",
+                user_id,
+                notification_id
+            )
+            
+            if not result:
+                raise Exception("NOTIFICATION_NOT_FOUND")
+            
+            row = result[0]
+            
+            logger.info(
+                "notification_marked_read",
+                notification_id=str(notification_id),
+                user_id=str(user_id)
+            )
+            
+            return {
+                "notification_id": row["notification_id"],
+                "status": row["status"],
+                "read_at": row["read_at"]
+            }
+            
+        except Exception as e:
+            raise handle_db_exception(e)
+    
+    async def mark_as_read_bulk(
+        self,
+        user_id: UUID,
+        notification_ids: Optional[List[UUID]],
+        notification_type: Optional[NotificationType]
+    ) -> MarkReadResponse:
+        """
+        Mark multiple notifications as read.
+        
+        Calls: activity.sp_mark_notifications_as_read_bulk
+        """
+        try:
+            # Convert to appropriate types
+            ids_array = notification_ids if notification_ids else None
+            type_str = notification_type.value if notification_type else None
+            
+            result = await db.execute_sp(
+                "activity.sp_mark_notifications_as_read_bulk",
+                user_id,
+                ids_array,
+                type_str
+            )
+            
+            updated_count = result[0]["updated_count"] if result else 0
+            
+            logger.info(
+                "notifications_marked_read_bulk",
+                user_id=str(user_id),
+                count=updated_count
+            )
+            
+            return MarkReadResponse(
+                updated_count=updated_count,
+                message=f"{updated_count} notifications marked as read"
+            )
+            
+        except Exception as e:
+            raise handle_db_exception(e)
+    
+    async def delete_notification(
+        self,
+        user_id: UUID,
+        notification_id: UUID,
+        permanent: bool
+    ) -> DeleteResponse:
+        """
+        Delete or archive notification.
+        
+        Calls: activity.sp_delete_notification
+        """
+        try:
+            result = await db.execute_sp(
+                "activity.sp_delete_notification",
+                user_id,
+                notification_id,
+                permanent
+            )
+            
+            if not result:
+                raise Exception("NOTIFICATION_NOT_FOUND")
+            
+            row = result[0]
+            
+            logger.info(
+                "notification_deleted",
+                notification_id=str(notification_id),
+                permanent=permanent
+            )
+            
+            return DeleteResponse(
+                success=row["success"],
+                message=row["message"]
+            )
+            
+        except Exception as e:
+            raise handle_db_exception(e)
+    
+    async def get_unread_count(
+        self,
+        user_id: UUID,
+        include_premium_only: bool
+    ) -> UnreadCountResponse:
+        """
+        Get unread notification counts by type.
+        
+        Calls: activity.sp_get_unread_count
+        """
+        try:
+            result = await db.execute_sp(
+                "activity.sp_get_unread_count",
+                user_id,
+                include_premium_only
+            )
+            
+            if not result:
+                return UnreadCountResponse(total_unread=0, by_type={})
+            
+            row = result[0]
+            
+            by_type = {
+                "activity_invite": row["activity_invite_count"],
+                "activity_reminder": row["activity_reminder_count"],
+                "activity_update": row["activity_update_count"],
+                "community_invite": row["community_invite_count"],
+                "new_member": row["new_member_count"],
+                "new_post": row["new_post_count"],
+                "comment": row["comment_count"],
+                "reaction": row["reaction_count"],
+                "mention": row["mention_count"],
+                "profile_view": row["profile_view_count"],
+                "new_favorite": row["new_favorite_count"],
+                "system": row["system_count"]
+            }
+            
+            note = None
+            if not include_premium_only:
+                note = "Premium-exclusive notification types (profile_view, new_favorite) are not included"
+            
+            return UnreadCountResponse(
+                total_unread=row["total_unread"],
+                by_type=by_type,
+                note=note
+            )
+            
+        except Exception as e:
+            raise handle_db_exception(e)
+    
+    async def create_notification(
+        self,
+        user_id: UUID,
+        actor_user_id: Optional[UUID],
+        notification_type: NotificationType,
+        target_type: str,
+        target_id: UUID,
+        title: str,
+        message: Optional[str],
+        payload: Optional[dict]
+    ) -> CreateNotificationResponse:
+        """
+        Create new notification (internal service).
+        
+        Calls: activity.sp_create_notification
+        """
+        try:
+            result = await db.execute_sp(
+                "activity.sp_create_notification",
+                user_id,
+                actor_user_id,
+                notification_type.value,
+                target_type,
+                target_id,
+                title,
+                message,
+                payload
+            )
+            
+            if not result:
+                return CreateNotificationResponse(
+                    notification_id=None,
+                    created_at=None,
+                    status="skipped",
+                    reason="User has disabled this notification type"
+                )
+            
+            row = result[0]
+            
+            if row["notification_id"]:
+                logger.info(
+                    "notification_created",
+                    notification_id=str(row["notification_id"]),
+                    user_id=str(user_id),
+                    type=notification_type.value
+                )
+                return CreateNotificationResponse(
+                    notification_id=row["notification_id"],
+                    created_at=row["created_at"],
+                    status="created"
+                )
+            else:
+                logger.info(
+                    "notification_skipped",
+                    user_id=str(user_id),
+                    type=notification_type.value
+                )
+                return CreateNotificationResponse(
+                    notification_id=None,
+                    created_at=None,
+                    status="skipped",
+                    reason="User has disabled this notification type"
+                )
+            
+        except Exception as e:
+            raise handle_db_exception(e)
+```
+
+#### Step 4.2: app/services/settings_service.py
+```python
+"""
+Settings business logic service.
+Calls stored procedures for notification settings.
+"""
+from typing import Optional
+from uuid import UUID
+import structlog
+
+from app.core.database import db
+from app.core.exceptions import handle_db_exception
+from app.schemas.settings import NotificationSettingsResponse
+
+logger = structlog.get_logger()
+
+class SettingsService:
+    """Service for notification settings operations"""
+    
+    async def get_settings(self, user_id: UUID) -> NotificationSettingsResponse:
+        """
+        Get user's notification settings.
+        
+        Calls: activity.sp_get_notification_settings
+        """
+        try:
+            result = await db.execute_sp(
+                "activity.sp_get_notification_settings",
+                user_id
+            )
+            
+            if not result:
+                # Should not happen (SP returns defaults)
+                raise Exception("USER_NOT_FOUND")
+            
+            row = result[0]
+            
+            return NotificationSettingsResponse(
+                user_id=row["user_id"],
+                email_notifications=row["email_notifications"],
+                push_notifications=row["push_notifications"],
+                activity_reminders=row["activity_reminders"],
+                community_updates=row["community_updates"],
+                friend_requests=row["friend_requests"],
+                marketing_emails=row["marketing_emails"],
+                ghost_mode=row["ghost_mode"],
+                language=row["language"],
+                timezone=row["timezone"]
+            )
+            
+        except Exception as e:
+            raise handle_db_exception(e)
+    
+    async def update_settings(
+        self,
+        user_id: UUID,
+        email_notifications: Optional[bool],
+        push_notifications: Optional[bool],
+        activity_reminders: Optional[bool],
+        community_updates: Optional[bool],
+        friend_requests: Optional[bool],
+        marketing_emails: Optional[bool],
+        ghost_mode: Optional[bool],
+        language: Optional[str],
+        timezone: Optional[str]
+    ) -> NotificationSettingsResponse:
+        """
+        Update user's notification settings.
+        
+        Calls: activity.sp_update_notification_settings
+        """
+        try:
+            result = await db.execute_sp(
+                "activity.sp_update_notification_settings",
+                user_id,
+                email_notifications,
+                push_notifications,
+                activity_reminders,
+                community_updates,
+                friend_requests,
+                marketing_emails,
+                ghost_mode,
+                language,
+                timezone
+            )
+            
+            if not result:
+                raise Exception("USER_NOT_FOUND")
+            
+            row = result[0]
+            
+            logger.info(
+                "settings_updated",
+                user_id=str(user_id),
+                ghost_mode=row["ghost_mode"]
+            )
+            
+            return NotificationSettingsResponse(
+                user_id=row["user_id"],
+                email_notifications=row["email_notifications"],
+                push_notifications=row["push_notifications"],
+                activity_reminders=row["activity_reminders"],
+                community_updates=row["community_updates"],
+                friend_requests=row["friend_requests"],
+                marketing_emails=row["marketing_emails"],
+                ghost_mode=row["ghost_mode"],
+                language=row["language"],
+                timezone=row["timezone"],
+                updated_at=row["updated_at"]
+            )
+            
+        except Exception as e:
+            raise handle_db_exception(e)
+```
+
+---
+
+### PHASE 5: ROUTES/ENDPOINTS
+
+#### Step 5.1: app/routes/health.py
+```python
+"""
+Health check endpoint for monitoring.
+"""
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+import structlog
+
+from app.core.database import db
+
+router = APIRouter()
+logger = structlog.get_logger()
+
+@router.get("/health")
+async def health_check():
+    """
+    Health check endpoint.
+    Returns 200 if API is healthy, 503 if degraded.
+    """
+    checks = {
+        "api": "ok"
+    }
+    
+    # Check database connection
+    try:
+        async with db.pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        checks["database"] = "ok"
+    except Exception as e:
+        logger.error("health_check_database_failed", error=str(e))
+        checks["database"] = "error"
+    
+    # Determine overall status
+    all_ok = all(v == "ok" for v in checks.values())
+    status_code = 200 if all_ok else 503
+    
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "ok" if all_ok else "degraded",
+            "checks": checks
+        }
+    )
+```
+
+#### Step 5.2: app/routes/notifications.py
+```python
+"""
+Notification endpoints.
+All endpoints require JWT authentication.
+"""
+from fastapi import APIRouter, Depends, Query, Path, Header
+from typing import Optional, List
+from uuid import UUID
+import structlog
+
+from app.core.security import get_current_user, TokenData, verify_service_token
+from app.core.exceptions import ValidationException, UnauthorizedException
+from app.services.notification_service import NotificationService
+from app.schemas.notifications import (
+    NotificationListResponse,
+    NotificationResponse,
+    NotificationStatus,
+    NotificationType,
+    MarkReadBulkRequest,
+    MarkReadResponse,
+    DeleteResponse,
+    UnreadCountResponse,
+    CreateNotificationRequest,
+    CreateNotificationResponse,
+    PaginationMeta
+)
+
+router = APIRouter()
+logger = structlog.get_logger()
+
+# Initialize service
+notification_service = NotificationService()
+
+@router.get("", response_model=NotificationListResponse)
+async def get_notifications(
+    current_user: TokenData = Depends(get_current_user),
+    status: Optional[NotificationStatus] = Query(None),
+    type: Optional[NotificationType] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0)
+):
+    """
+    Get paginated list of user's notifications.
+    
+    Query params:
+        - status: Filter by status (unread, read, archived)
+        - type: Filter by notification type
+        - limit: Page size (1-100, default 20)
+        - offset: Pagination offset (default 0)
+    """
+    # Determine if user is premium
+    include_premium = current_user.subscription_level != "free"
+    
+    notifications, total_count = await notification_service.get_user_notifications(
+        user_id=UUID(current_user.user_id),
+        status=status,
+        notification_type=type,
+        limit=limit,
+        offset=offset,
+        include_premium_only=include_premium
+    )
+    
+    return NotificationListResponse(
+        notifications=notifications,
+        pagination=PaginationMeta(
+            total=total_count,
+            limit=limit,
+            offset=offset,
+            has_more=(offset + limit) < total_count
+        )
+    )
+
+@router.get("/{notification_id}", response_model=NotificationResponse)
+async def get_notification(
+    notification_id: UUID = Path(...),
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Get single notification by ID.
+    """
+    return await notification_service.get_notification_by_id(
+        user_id=UUID(current_user.user_id),
+        notification_id=notification_id
+    )
+
+@router.patch("/{notification_id}/read")
+async def mark_notification_read(
+    notification_id: UUID = Path(...),
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Mark single notification as read.
+    """
+    return await notification_service.mark_as_read(
+        user_id=UUID(current_user.user_id),
+        notification_id=notification_id
+    )
+
+@router.post("/mark-read", response_model=MarkReadResponse)
+async def mark_notifications_read_bulk(
+    request: MarkReadBulkRequest,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Mark multiple notifications as read (bulk operation).
+    
+    Options:
+        1. Provide notification_ids to mark specific notifications
+        2. Set mark_all=true to mark all unread
+        3. Combine mark_all + notification_type to mark all of specific type
+    """
+    # Validation: notification_type requires mark_all
+    if request.notification_type and not request.mark_all:
+        raise ValidationException("notification_type requires mark_all=true")
+    
+    return await notification_service.mark_as_read_bulk(
+        user_id=UUID(current_user.user_id),
+        notification_ids=[UUID(id) for id in request.notification_ids] if request.notification_ids else None,
+        notification_type=request.notification_type
+    )
+
+@router.delete("/{notification_id}", response_model=DeleteResponse)
+async def delete_notification(
+    notification_id: UUID = Path(...),
+    permanent: bool = Query(False),
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Archive or permanently delete notification.
+    
+    Query params:
+        - permanent: If true, hard delete. If false (default), archive.
+    """
+    return await notification_service.delete_notification(
+        user_id=UUID(current_user.user_id),
+        notification_id=notification_id,
+        permanent=permanent
+    )
+
+@router.get("/unread/count", response_model=UnreadCountResponse)
+async def get_unread_count(
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Get count of unread notifications by type.
+    """
+    include_premium = current_user.subscription_level != "free"
+    
+    return await notification_service.get_unread_count(
+        user_id=UUID(current_user.user_id),
+        include_premium_only=include_premium
+    )
+
+@router.post("", response_model=CreateNotificationResponse, status_code=201)
+async def create_notification(
+    request: CreateNotificationRequest,
+    x_service_token: Optional[str] = Header(None)
+):
+    """
+    Create new notification (internal service-to-service).
+    
+    Requires X-Service-Token header.
+    """
+    # Verify service token
+    if not x_service_token or not verify_service_token(x_service_token):
+        raise UnauthorizedException("Invalid service token")
+    
+    result = await notification_service.create_notification(
+        user_id=request.user_id,
+        actor_user_id=request.actor_user_id,
+        notification_type=request.notification_type,
+        target_type=request.target_type,
+        target_id=request.target_id,
+        title=request.title,
+        message=request.message,
+        payload=request.payload
+    )
+    
+    # Return 201 if created, 200 if skipped
+    if result.status == "created":
+        return result
+    else:
+        return result
+```
+
+#### Step 5.3: app/routes/settings.py
+```python
+"""
+Notification settings endpoints.
+All endpoints require JWT authentication.
+"""
+from fastapi import APIRouter, Depends
+import structlog
+
+from app.core.security import get_current_user, TokenData
+from app.services.settings_service import SettingsService
+from app.schemas.settings import (
+    NotificationSettingsResponse,
+    UpdateSettingsRequest
+)
+from uuid import UUID
+
+router = APIRouter()
+logger = structlog.get_logger()
+
+# Initialize service
+settings_service = SettingsService()
+
+@router.get("", response_model=NotificationSettingsResponse)
+async def get_settings(
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Get user's notification settings.
+    Returns defaults if settings don't exist yet.
+    """
+    return await settings_service.get_settings(
+        user_id=UUID(current_user.user_id)
+    )
+
+@router.patch("", response_model=NotificationSettingsResponse)
+async def update_settings(
+    request: UpdateSettingsRequest,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Update user's notification settings.
+    All fields are optional - only send fields to update.
+    
+    Note: ghost_mode requires Premium subscription.
+    """
+    return await settings_service.update_settings(
+        user_id=UUID(current_user.user_id),
+        email_notifications=request.email_notifications,
+        push_notifications=request.push_notifications,
+        activity_reminders=request.activity_reminders,
+        community_updates=request.community_updates,
+        friend_requests=request.friend_requests,
+        marketing_emails=request.marketing_emails,
+        ghost_mode=request.ghost_mode,
+        language=request.language,
+        timezone=request.timezone
+    )
+```
+
+---
+
+### PHASE 6: MAIN APPLICATION
+
+#### Step 6.1: app/main.py
+```python
+"""
+FastAPI application initialization.
+Sets up middleware, routes, and lifecycle events.
+"""
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import structlog
+
+from app.config import settings
+from app.core.logging_config import setup_logging
+from app.core.database import db
+from app.middleware.correlation import CorrelationMiddleware
+from app.routes import health, notifications, settings as settings_routes
+
+# Setup logging
+setup_logging(settings.ENVIRONMENT, settings.LOG_LEVEL)
+logger = structlog.get_logger()
+
+# Create FastAPI app
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Add correlation ID middleware
+app.add_middleware(CorrelationMiddleware)
+
+# Include routers
+app.include_router(health.router, tags=["health"])
+app.include_router(
+    notifications.router,
+    prefix=f"{settings.API_V1_PREFIX}/notifications",
+    tags=["notifications"]
+)
+app.include_router(
+    settings_routes.router,
+    prefix=f"{settings.API_V1_PREFIX}/notifications/settings",
+    tags=["settings"]
+)
+
+# Startup event
+@app.on_event("startup")
+async def startup():
+    """Initialize database connection on startup"""
+    logger.info(
+        "api_starting",
+        environment=settings.ENVIRONMENT,
+        project=settings.PROJECT_NAME
+    )
+    await db.connect(settings.database_url)
+    logger.info("api_started")
+
+# Shutdown event
+@app.on_event("shutdown")
+async def shutdown():
+    """Close database connection on shutdown"""
+    logger.info("api_shutting_down")
+    await db.disconnect()
+    logger.info("api_shutdown_complete")
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {
+        "name": settings.PROJECT_NAME,
+        "version": "1.0.0",
+        "status": "running"
+    }
+```
+
+---
+
+### PHASE 7: DOCKER & DEPLOYMENT
+
+#### Step 7.1: Dockerfile
+```dockerfile
+FROM python:3.11-slim as builder
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+FROM python:3.11-slim
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser
+
+WORKDIR /app
+
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy application code
+COPY app/ ./app/
+
+# Change ownership
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
+
+# Run application
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+#### Step 7.2: docker-compose.yml
+```yaml
+version: '3.8'
+
+services:
+  notifications-api:
+    build: .
+    ports:
+      - "8003:8000"
+    environment:
+      - DB_HOST=${DB_HOST:-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-activity_platform}
+      - DB_USER=${DB_USER:-api_user}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - SERVICE_TOKEN=${SERVICE_TOKEN}
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - app-network
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: activity_platform
+      POSTGRES_USER: api_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge
+```
+
+---
+
+### PHASE 8: README & DOCUMENTATION
+
+#### Step 8.1: README.md
+```markdown
+# Notifications API
+
+FastAPI-based notifications service with PostgreSQL stored procedures.
+
+## Features
+
+- JWT authentication
+- Structured logging with correlation IDs
+- Health check endpoint
+- Docker containerization
+- 9 RESTful endpoints
+
+## Setup
+
+### Prerequisites
+- Python 3.11+
+- PostgreSQL 15+
+- Redis 7+
+
+### Local Development
+
+1. Copy environment file:
+```bash
+cp .env.example .env
+```
+
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+3. Run database migrations (create stored procedures):
+```bash
+# Connect to PostgreSQL and run stored procedure scripts
+psql -h localhost -U api_user -d activity_platform -f migrations/notifications_procedures.sql
+```
+
+4. Start API:
+```bash
+uvicorn app.main:app --reload
+```
+
+### Docker
+
+```bash
+docker-compose up -d
+```
+
+## API Documentation
+
+Once running, visit:
+- Swagger UI: http://localhost:8003/docs
+- ReDoc: http://localhost:8003/redoc
+
+## Endpoints
+
+### User Endpoints (JWT Required)
+- `GET /api/v1/notifications` - List notifications
+- `GET /api/v1/notifications/{id}` - Get single notification
+- `PATCH /api/v1/notifications/{id}/read` - Mark as read
+- `POST /api/v1/notifications/mark-read` - Bulk mark read
+- `DELETE /api/v1/notifications/{id}` - Archive/delete
+- `GET /api/v1/notifications/unread/count` - Get unread counts
+- `GET /api/v1/notifications/settings` - Get settings
+- `PATCH /api/v1/notifications/settings` - Update settings
+
+### Internal Endpoints (Service Token Required)
+- `POST /api/v1/notifications` - Create notification
+
+### Health Check
+- `GET /health` - Health status
+
+## Testing
+
+```bash
+pytest
+```
+
+## Environment Variables
+
+See `.env.example` for all required variables.
+```
+
+---
+
+## FINAL CHECKLIST FOR CLAUDE CODE
+
+Before considering the implementation complete, verify:
+
+### Database
+- [ ] All 10 stored procedures exist in PostgreSQL
+- [ ] Database connection pool works
+- [ ] Can execute stored procedures successfully
+
+### Authentication
+- [ ] JWT token validation works
+- [ ] User_id extracted from token correctly
+- [ ] Service token validation works for internal endpoint
+- [ ] Subscription level checked properly
+
+### Endpoints
+- [ ] All 9 endpoints respond correctly
+- [ ] Pagination works for list endpoint
+- [ ] Filtering by status/type works
+- [ ] Premium-only notifications filtered for free users
+- [ ] Bulk operations work correctly
+- [ ] Error responses match specification
+
+### Error Handling
+- [ ] PostgreSQL exceptions mapped to HTTP codes
+- [ ] 404 for not found
+- [ ] 403 for unauthorized access
+- [ ] 422 for validation errors
+- [ ] Proper error messages returned
+
+### Logging
+- [ ] Structured logging configured
+- [ ] Correlation IDs in all logs
+- [ ] Important events logged (creation, updates)
+- [ ] Errors logged with context
+
+### Code Quality
+- [ ] No raw SQL queries (only stored procedure calls)
+- [ ] Type hints on all functions
+- [ ] Docstrings on services and routes
+- [ ] Pydantic models match SP return types
+- [ ] Proper async/await usage
+
+### Docker
+- [ ] Dockerfile builds successfully
+- [ ] docker-compose.yml starts all services
+- [ ] Health check endpoint works
+- [ ] API accessible on port 8003
+
+---
+
+## SUCCESS CRITERIA
+
+The implementation is complete when:
+
+1. ✅ All 9 endpoints work as specified
+2. ✅ Can create, read, update, and delete notifications
+3. ✅ JWT authentication enforced on user endpoints
+4. ✅ Service token authentication works for internal endpoint
+5. ✅ Premium features filtered correctly for free users
+6. ✅ All errors handled and mapped correctly
+7. ✅ Logging includes correlation IDs
+8. ✅ Health check returns database status
+9. ✅ Docker container runs successfully
+10. ✅ API documentation (Swagger) displays all endpoints
+
+---
+
+## IMPORTANT REMINDERS FOR AI AGENT
+
+1. **Read the specification document first** - It contains all endpoint details
+2. **Never write raw SQL** - Always use stored procedures
+3. **Extract user_id from JWT token** - Never trust client input
+4. **Map database exceptions** - Use the EXCEPTION_MAPPING dictionary
+5. **Follow the exact project structure** - As defined in this document
+6. **Test each endpoint** - Before moving to the next
+7. **Check subscription level** - Premium vs Free user filtering
+8. **Include correlation IDs** - In all log messages
+9. **Handle NULL values** - From stored procedures properly
+10. **Return proper HTTP codes** - 200, 201, 400, 401, 403, 404, 422, 500
+
+Good luck! The specification document has all the details you need. Build methodically, test thoroughly, and follow the patterns shown in this guide.
