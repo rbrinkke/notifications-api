@@ -75,6 +75,10 @@ class NotificationService:
                         main_photo_url=row["actor_main_photo_url"]
                     )
 
+                # Deserialize payload JSON string to dict
+                import json
+                payload_dict = json.loads(row["payload"]) if row["payload"] else None
+
                 notification = NotificationResponse(
                     notification_id=row["notification_id"],
                     user_id=row["user_id"],
@@ -87,7 +91,7 @@ class NotificationService:
                     status=row["status"],
                     created_at=row["created_at"],
                     read_at=row["read_at"],
-                    payload=row["payload"]
+                    payload=payload_dict
                 )
                 notifications.append(notification)
 
@@ -136,6 +140,10 @@ class NotificationService:
                     main_photo_url=row["actor_main_photo_url"]
                 )
 
+            # Deserialize payload JSON string to dict
+            import json
+            payload_dict = json.loads(row["payload"]) if row["payload"] else None
+
             return NotificationResponse(
                 notification_id=row["notification_id"],
                 user_id=row["user_id"],
@@ -148,7 +156,7 @@ class NotificationService:
                 status=row["status"],
                 created_at=row["created_at"],
                 read_at=row["read_at"],
-                payload=row["payload"]
+                payload=payload_dict
             )
 
         except Exception as e:
@@ -335,6 +343,10 @@ class NotificationService:
         Calls: activity.sp_create_notification
         """
         try:
+            # Convert payload dict to JSON string for stored procedure
+            import json
+            payload_json = json.dumps(payload) if payload else None
+
             result = await db.execute_sp(
                 "activity.sp_create_notification",
                 user_id,
@@ -344,7 +356,7 @@ class NotificationService:
                 target_id,
                 title,
                 message,
-                payload
+                payload_json
             )
 
             if not result:
@@ -381,6 +393,97 @@ class NotificationService:
                     status="skipped",
                     reason="User has disabled this notification type"
                 )
+
+        except Exception as e:
+            raise handle_db_exception(e)
+
+    async def get_user_settings(
+        self,
+        user_id: UUID
+    ) -> dict:
+        """
+        Get user notification settings.
+
+        Calls: activity.sp_get_user_settings
+        """
+        try:
+            result = await db.execute_sp(
+                "activity.sp_get_user_settings",
+                user_id
+            )
+
+            if not result:
+                # Return defaults if no settings exist
+                return {
+                    "user_id": user_id,
+                    "email_notifications": True,
+                    "push_notifications": True,
+                    "activity_reminders": True,
+                    "community_updates": True,
+                    "friend_requests": True,
+                    "marketing_emails": False,
+                    "ghost_mode": False,
+                    "language": "en",
+                    "timezone": "UTC",
+                    "updated_at": None
+                }
+
+            row = result[0]
+
+            logger.info(
+                "user_settings_retrieved",
+                user_id=str(user_id)
+            )
+
+            return {
+                "user_id": user_id,
+                "email_notifications": row["email_notifications"],
+                "push_notifications": row["push_notifications"],
+                "activity_reminders": row["activity_reminders"],
+                "community_updates": row["community_updates"],
+                "friend_requests": row["friend_requests"],
+                "marketing_emails": row["marketing_emails"],
+                "ghost_mode": row["ghost_mode"],
+                "language": row["language"],
+                "timezone": row["timezone"],
+                "updated_at": None
+            }
+
+        except Exception as e:
+            raise handle_db_exception(e)
+
+    async def update_user_settings(
+        self,
+        user_id: UUID,
+        settings: any
+    ) -> dict:
+        """
+        Update user notification settings.
+
+        Calls: activity.sp_update_user_settings
+        """
+        try:
+            result = await db.execute_sp(
+                "activity.sp_update_user_settings",
+                user_id,
+                settings.email_notifications,
+                settings.push_notifications,
+                settings.activity_reminders,
+                settings.community_updates,
+                settings.friend_requests,
+                settings.marketing_emails,
+                settings.ghost_mode,
+                settings.language,
+                settings.timezone
+            )
+
+            logger.info(
+                "user_settings_updated",
+                user_id=str(user_id)
+            )
+
+            # Return updated settings
+            return await self.get_user_settings(user_id)
 
         except Exception as e:
             raise handle_db_exception(e)

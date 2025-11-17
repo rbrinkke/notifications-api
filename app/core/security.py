@@ -60,12 +60,12 @@ async def get_current_user(
 
     # Extract required fields
     user_id = payload.get("sub")
-    email = payload.get("email")
 
-    if not user_id or not email:
+    if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token payload")
 
-    # Extract optional fields
+    # Extract optional fields (email not required in minimal JWT from auth-api)
+    email = payload.get("email", "unknown@example.com")
     subscription_level = payload.get("subscription_level", "free")
     org_id = payload.get("org_id")
 

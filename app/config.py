@@ -44,8 +44,9 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "*"  # Comma-separated list of origins or "*"
 
-    # API Documentation
+    # API Documentation (Swagger UI / OpenAPI)
     ENABLE_DOCS: bool = True
+    API_VERSION: str = "1.0.0"
 
     @property
     def database_url(self) -> str:

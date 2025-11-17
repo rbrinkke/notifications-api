@@ -33,7 +33,7 @@ INSERT INTO activity.users (
 )
 SELECT
     uuidv7(),
-    'testuser' || i || '@meet5.test',
+    'testuser' || i || '@test.local',
     'testuser' || i,
     '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5NU7dNmDwSIva', -- password: test123
     CASE (i % 10)
@@ -102,7 +102,7 @@ BEGIN
     -- Get all test user IDs
     SELECT array_agg(user_id) INTO v_user_ids
     FROM activity.users
-    WHERE email LIKE '%@meet5.test';
+    WHERE email LIKE '%@test.local';
 
     v_user_count := array_length(v_user_ids, 1);
 
@@ -388,7 +388,7 @@ LIMIT 5;
 \echo '🎉 Done! 1000 test notifications have been generated successfully!'
 \echo ''
 \echo '💡 Tip: You can run this script multiple times. It will add more notifications each time.'
-\echo '💡 To clean up: DELETE FROM activity.notifications WHERE user_id IN (SELECT user_id FROM activity.users WHERE email LIKE ''%@meet5.test'');'
+\echo '💡 To clean up: DELETE FROM activity.notifications WHERE user_id IN (SELECT user_id FROM activity.users WHERE email LIKE ''%@test.local'');'
 \echo ''
 
 -- Cleanup function (optional, for future use)

@@ -102,7 +102,7 @@ ENUMs must be defined:
 ## 📊 What Gets Created
 
 ### Test Users (30 accounts)
-- **Emails**: `testuser1@meet5.test` through `testuser30@meet5.test`
+- **Emails**: `testuser1@test.local` through `testuser30@test.local`
 - **Usernames**: `testuser1` through `testuser30`
 - **Password**: `test123` (hash: `$2b$12$LQv3c1yqBWVHxkd0LHAkCO...`)
 - **Names**: Realistic first/last name combinations
@@ -152,12 +152,12 @@ To remove all test data:
 DELETE FROM activity.notifications
 WHERE user_id IN (
     SELECT user_id FROM activity.users
-    WHERE email LIKE '%@meet5.test'
+    WHERE email LIKE '%@test.local'
 );
 
 -- Remove test users
 DELETE FROM activity.users
-WHERE email LIKE '%@meet5.test';
+WHERE email LIKE '%@test.local';
 ```
 
 Or using the Python script (future enhancement):
@@ -256,7 +256,7 @@ Check your `.env` file has the correct database credentials and the database is 
 
 ## 📝 Notes
 
-- Test data uses `@meet5.test` domain to easily identify and clean up
+- Test data uses `@test.local` domain to easily identify and clean up
 - All passwords are `test123` for convenience
 - UUIDs for `target_id` are random (won't match real posts/activities)
 - Timestamps are randomized but chronologically ordered via UUIDv7

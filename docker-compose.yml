@@ -4,49 +4,31 @@ services:
   notifications-api:
     build: .
     ports:
-      - "8003:8000"
+      - "8006:8000"
     environment:
-      - DB_HOST=${DB_HOST:-postgres}
-      - DB_PORT=${DB_PORT:-5432}
-      - DB_NAME=${DB_NAME:-activity_platform}
-      - DB_USER=${DB_USER:-api_user}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - JWT_SECRET=${JWT_SECRET}
-      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
-      - SERVICE_TOKEN=${SERVICE_TOKEN}
-      - REDIS_HOST=${REDIS_HOST:-redis}
-      - REDIS_PORT=${REDIS_PORT:-6379}
-      - ENVIRONMENT=${ENVIRONMENT:-development}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    depends_on:
-      - postgres
-      - redis
+      - DB_HOST=activity-postgres-db
+      - DB_PORT=5432
+      - DB_NAME=activitydb
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres_secure_password_change_in_prod
+      - JWT_SECRET=dev_secret_key_change_in_production_min_32_chars_required
+      - JWT_ALGORITHM=HS256
+      - SERVICE_TOKEN=shared-secret-token-change-in-production
+      - REDIS_HOST=auth-redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - API_V1_PREFIX=/api/v1
+      - PROJECT_NAME=Notifications API
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - LOG_LEVEL=INFO
+      - CORS_ORIGINS=*
+      - ENABLE_DOCS=true
+      - EMAIL_API_URL=http://email-api:8000
     networks:
-      - app-network
-
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_DB: activity_platform
-      POSTGRES_USER: api_user
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - app-network
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    networks:
-      - app-network
-
-volumes:
-  postgres_data:
+      - activity-network
+    container_name: notifications-api
 
 networks:
-  app-network:
-    driver: bridge
+  activity-network:
+    external: true

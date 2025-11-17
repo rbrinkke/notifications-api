@@ -1,13 +1,14 @@
 """
 Pydantic models for user notification settings.
 """
-from pydantic import BaseModel, UUID4
+from pydantic import BaseModel
+from uuid import UUID
 from datetime import datetime
 from typing import Optional
 
 class NotificationSettingsResponse(BaseModel):
     """User notification settings response"""
-    user_id: UUID4
+    user_id: UUID
     email_notifications: bool
     push_notifications: bool
     activity_reminders: bool

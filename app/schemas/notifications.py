@@ -2,7 +2,8 @@
 Pydantic models for notification requests and responses.
 These match the stored procedure return types.
 """
-from pydantic import BaseModel, UUID4, Field
+from pydantic import BaseModel, Field
+from uuid import UUID
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from enum import Enum
@@ -30,7 +31,7 @@ class NotificationStatus(str, Enum):
 
 class ActorInfo(BaseModel):
     """Actor who triggered the notification"""
-    user_id: UUID4
+    user_id: UUID
     username: str
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -38,12 +39,12 @@ class ActorInfo(BaseModel):
 
 class NotificationResponse(BaseModel):
     """Single notification response"""
-    notification_id: UUID4
-    user_id: UUID4
+    notification_id: UUID
+    user_id: UUID
     actor: Optional[ActorInfo] = None
     notification_type: NotificationType
     target_type: str
-    target_id: UUID4
+    target_id: UUID
     title: str
     message: Optional[str] = None
     status: NotificationStatus
@@ -71,7 +72,7 @@ class UnreadCountResponse(BaseModel):
 
 class MarkReadBulkRequest(BaseModel):
     """Bulk mark-read request"""
-    notification_ids: Optional[List[UUID4]] = None
+    notification_ids: Optional[List[UUID]] = None
     mark_all: Optional[bool] = False
     notification_type: Optional[NotificationType] = None
 
@@ -87,18 +88,18 @@ class DeleteResponse(BaseModel):
 
 class CreateNotificationRequest(BaseModel):
     """Create notification request (internal service)"""
-    user_id: UUID4
-    actor_user_id: Optional[UUID4] = None
+    user_id: UUID
+    actor_user_id: Optional[UUID] = None
     notification_type: NotificationType
     target_type: str = Field(..., pattern="^(activity|post|comment|user)$")
-    target_id: UUID4
+    target_id: UUID
     title: str = Field(..., max_length=255)
     message: Optional[str] = None
     payload: Optional[Dict[str, Any]] = None
 
 class CreateNotificationResponse(BaseModel):
     """Create notification response"""
-    notification_id: Optional[UUID4]
+    notification_id: Optional[UUID]
     created_at: Optional[datetime]
     status: str
     reason: Optional[str] = None

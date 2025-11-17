@@ -76,7 +76,7 @@ def create_test_users(conn):
     users_data = []
     for i in range(1, 31):
         users_data.append((
-            f'testuser{i}@meet5.test',
+            f'testuser{i}@test.local',
             f'testuser{i}',
             '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5NU7dNmDwSIva',  # password: test123
             first_names[i % len(first_names)],
@@ -99,7 +99,7 @@ def create_test_users(conn):
 def get_test_user_ids(conn):
     """Get all test user IDs"""
     with conn.cursor() as cur:
-        cur.execute("SELECT user_id FROM activity.users WHERE email LIKE '%@meet5.test'")
+        cur.execute("SELECT user_id FROM activity.users WHERE email LIKE '%@test.local'")
         return [row[0] for row in cur.fetchall()]
 
 
@@ -389,7 +389,7 @@ def main():
         print("\n🎉 Done! 1000 test notifications have been generated successfully!")
         print("\n💡 Tip: Run this script multiple times to add more notifications")
         print("💡 To clean up: DELETE FROM activity.notifications WHERE user_id IN")
-        print("   (SELECT user_id FROM activity.users WHERE email LIKE '%@meet5.test');")
+        print("   (SELECT user_id FROM activity.users WHERE email LIKE '%@test.local');")
 
     except Exception as e:
         print(f"\n❌ Error: {e}")

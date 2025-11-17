@@ -1,6 +1,6 @@
 -- ============================================================================
 -- COMPLETE ACTIVITIES PLATFORM SCHEMA V3
--- Full Meet5-compatible schema with ALL privacy, monetization, and trust features
+-- Full Activity Platform schema with ALL privacy, monetization, and trust features
 -- Includes: Asymmetric blocking, Ghost mode, Main photo moderation, Priority participation
 -- ============================================================================
 
@@ -106,7 +106,7 @@ CREATE TYPE activity.report_type AS ENUM ('spam', 'harassment', 'inappropriate',
 -- CORE USER TABLES
 -- ============================================================================
 
--- 1. users - Core user accounts with Meet5 subscription model
+-- 1. users - Core user accounts with subscription model
 CREATE TABLE activity.users (
     user_id UUID PRIMARY KEY DEFAULT uuidv7(),
     email VARCHAR(255) UNIQUE NOT NULL,
@@ -123,7 +123,7 @@ CREATE TABLE activity.users (
     date_of_birth DATE,
     gender VARCHAR(50),
     
-    -- Meet5 subscription & status
+    -- subscription & status
     subscription_level activity.subscription_level NOT NULL DEFAULT 'free',
     subscription_expires_at TIMESTAMP WITH TIME ZONE,
     status activity.user_status NOT NULL DEFAULT 'active',
@@ -180,7 +180,7 @@ CREATE INDEX idx_users_verified ON activity.users(is_verified) WHERE is_verified
 CREATE INDEX idx_users_main_photo_moderation ON activity.users(main_photo_moderation_status) 
     WHERE main_photo_moderation_status = 'pending';
 
-COMMENT ON TABLE activity.users IS 'Core user accounts with Meet5 subscription model and verification system';
+COMMENT ON TABLE activity.users IS 'Core user accounts with subscription model and verification system';
 COMMENT ON COLUMN activity.users.subscription_level IS 'Subscription tier: free (basic), club (mid-tier), premium (full features)';
 COMMENT ON COLUMN activity.users.is_captain IS 'Captain program members receive free Premium subscription';
 COMMENT ON COLUMN activity.users.verification_count IS 'Number of successful attendance verifications by other users';
@@ -221,7 +221,7 @@ COMMENT ON TABLE activity.categories IS 'Activity categories (e.g., Outdoor, Foo
 -- CORE ACTIVITY TABLES
 -- ============================================================================
 
--- 3. activities - Main activities table with Meet5 features
+-- 3. activities - Main activities table with platform features
 CREATE TABLE activity.activities (
     activity_id UUID PRIMARY KEY DEFAULT uuidv7(),
     organizer_user_id UUID NOT NULL REFERENCES activity.users(user_id),
@@ -289,7 +289,7 @@ CREATE INDEX idx_activities_city ON activity.activities(city) WHERE city IS NOT 
 CREATE INDEX idx_activities_language ON activity.activities(language);
 CREATE INDEX idx_activities_joinable_free ON activity.activities(joinable_at_free) WHERE joinable_at_free IS NOT NULL;
 
-COMMENT ON TABLE activity.activities IS 'Main activities with Meet5 features: privacy levels, activity types, language filtering, priority participation';
+COMMENT ON TABLE activity.activities IS 'Main activities with platform features: privacy levels, activity types, language filtering, priority participation';
 COMMENT ON COLUMN activity.activities.activity_type IS 'Activity type: standard, xxl (100+ people - blocking does NOT work for XXL), womens_only, mens_only';
 COMMENT ON COLUMN activity.activities.activity_privacy_level IS 'public (everyone), friends_only (accepted friends), invite_only (explicit invitations)';
 COMMENT ON COLUMN activity.activities.language IS 'ISO 639-1 language code (e.g., en, nl, de) - Premium users can hide activities in other languages';

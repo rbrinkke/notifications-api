@@ -34,7 +34,7 @@ python seed_notifications.py
 
 ## 📊 What You Get
 
-- ✅ **30 test users** (testuser1@meet5.test ... testuser30@meet5.test)
+- ✅ **30 test users** (testuser1@test.local ... testuser30@test.local)
 - ✅ **1000 notifications** with realistic distribution
 - ✅ **12 notification types** (comment, reaction, activity_invite, etc.)
 - ✅ **3 statuses** (75% unread, 20% read, 5% archived)
@@ -67,10 +67,10 @@ LIMIT 10;
 DELETE FROM activity.notifications
 WHERE user_id IN (
     SELECT user_id FROM activity.users
-    WHERE email LIKE '%@meet5.test'
+    WHERE email LIKE '%@test.local'
 );
 
-DELETE FROM activity.users WHERE email LIKE '%@meet5.test';
+DELETE FROM activity.users WHERE email LIKE '%@test.local';
 ```
 
 ---
